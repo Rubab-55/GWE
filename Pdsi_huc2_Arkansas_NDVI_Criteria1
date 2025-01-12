@@ -1,0 +1,177 @@
+// Load the GRIDMET Drought: CONUS Drought Indices dataset
+var droughtData = ee.ImageCollection('GRIDMET/DROUGHT');
+
+// Define the HUC-2 region for Arkansas HUC-2
+var arkansasHUC2 = ee.FeatureCollection("USGS/WBD/2017/HUC02")
+  .filter(ee.Filter.eq('huc2', '08'))  // HUC2 code '08' corresponds to the Arkansas region
+  .map(function(feature) {
+    return feature.simplify(1000);  // Simplify the geometry to reduce complexity
+  });
+
+// Load the SRTM 30m Digital Elevation Data
+var srtm = ee.Image('USGS/SRTMGL1_003');
+
+// Clip the DEM to the Arkansas HUC-2 boundaries
+var clippedDEMArkansas = srtm.clipToCollection(arkansasHUC2);
+
+// Define visualization parameters for the DEM
+var demVisParams = {
+  min: 0,
+  max: 4000,
+  palette: ['000000', '0000FF', '00FFFF', '00FF00', 'FFFF00', 'FF8000', 'FF0000', 'FFFFFF']
+};
+
+// Add the clipped DEM layer to the map
+Map.addLayer(clippedDEMArkansas, demVisParams, '30m DEM Arkansas HUC-2');
+
+// Function to compute NDVI using Landsat 8 Collection 2
+function computeNDVI(image) {
+  var ndvi = image.normalizedDifference(['SR_B5', 'SR_B4']).rename('NDVI');
+  return ndvi;
+}
+
+// Define the date range for the dry season in the Arkansas region
+var dryStartDate = '2021-10-01';
+var dryEndDate = '2021-11-30';
+
+// Load Landsat 8 Collection 2 surface reflectance data for the dry season
+var landsat8Collection = ee.ImageCollection('LANDSAT/LC08/C02/T1_L2')
+  .filterDate(dryStartDate, dryEndDate)
+  .filter(ee.Filter.lt('CLOUD_COVER', 40))
+  .map(function(image) {
+    // Apply scaling factors to Landsat Collection 2 data
+    return image
+      .select(['SR_B5', 'SR_B4'])
+      .multiply(0.0000275)
+      .add(-0.2)
+      .copyProperties(image, ['system:time_start']);
+  })
+  .map(computeNDVI);
+
+// Compute the median NDVI for the dry season
+var medianNDVI = landsat8Collection.median().select('NDVI');
+
+// Clip the NDVI image to the simplified Arkansas HUC-2 boundaries
+var clippedNDVIArkansas = medianNDVI.clipToCollection(arkansasHUC2);
+
+// Sample points for clustering (increased number of points and adjusted scale)
+var training = clippedNDVIArkansas.sample({
+  region: arkansasHUC2.geometry(),
+  scale: 30,  // Adjust the scale to capture more data points
+  numPixels: 1000,  // Increased number of sample points for better clustering
+  geometries: true
+});
+
+// Check if there are any data points in the training data
+var sampleSize = training.size();
+print('Sample size:', sampleSize);
+
+if (sampleSize.gt(0)) {
+  // Apply k-means clustering with 5 clusters (from low to high NDVI)
+  var clusterer = ee.Clusterer.wekaKMeans(5).train(training);
+  var clustered = clippedNDVIArkansas.cluster(clusterer);
+
+  // Define visualization parameters for clustering
+  var clusterVisParams = {
+    min: 1,
+    max: 5,
+    palette: ['FF0000', 'FFA500', 'FFFF00', '00FF00', '008000']  // From low to high NDVI
+  };
+
+  // Add the clustered NDVI layer to the map
+  Map.addLayer(clustered.visualize(clusterVisParams), {}, 'Clustered NDVI Arkansas HUC-2');
+
+  // Add the NDVI layer for the Arkansas HUC-2 region to the map
+  var ndviParams = {
+    min: -1,
+    max: 1,
+    palette: ['#000080', '#0000FF', '#00FFFF', '#00FF00', '#FFFF00', '#FF0000', '#800000']
+  };
+  Map.addLayer(clippedNDVIArkansas.visualize(ndviParams), {}, 'NDVI Arkansas HUC-2');
+
+  // Center the map on the Arkansas HUC-2 region
+  Map.centerObject(arkansasHUC2, 7);
+
+  // Add the HUC-2 boundaries to the map as a FeatureCollection
+  Map.addLayer(arkansasHUC2.style({color: '000000', width: 2, fillColor: '00000000'}), {}, 'Arkansas HUC-2 Boundary');
+
+  // Create a legend for the clustering
+  var legend = ui.Panel({
+    style: {
+      position: 'bottom-right',
+      padding: '8px 15px'
+    }
+  });
+
+  var legendTitle = ui.Label({
+    value: 'NDVI Clusters',
+    style: {
+      fontWeight: 'bold',
+      fontSize: '14px',
+      margin: '0 0 6px 0',
+      padding: '0'
+    }
+  });
+
+  legend.add(legendTitle);
+
+  // Colors and labels for the clusters
+  var clusterColors = ['#FF0000', '#FFA500', '#FFFF00', '#00FF00', '#008000'];
+  var clusterLabels = ['Very Low NDVI', 'Low NDVI', 'Moderate NDVI', 'High NDVI', 'Very High NDVI'];
+
+  // Add color boxes and labels to the legend
+  for (var i = 0; i < clusterColors.length; i++) {
+    var colorBox = ui.Label({
+      style: {
+        backgroundColor: clusterColors[i],
+        padding: '8px',
+        margin: '0 0 4px 0'
+      }
+    });
+
+    var description = ui.Label({
+      value: clusterLabels[i],
+      style: {margin: '0 0 4px 6px'}
+    });
+
+    legend.add(ui.Panel({
+      widgets: [colorBox, description],
+      layout: ui.Panel.Layout.Flow('horizontal')
+    }));
+  }
+
+  // Add the legend to the map
+  Map.add(legend);
+
+  // Print the clustered image to the console for verification
+  print('Clustered NDVI Arkansas HUC-2:', clustered);
+} else {
+  print('No data was found in the training input. Try adjusting the date range or cloud cover threshold.');
+}
+// --- ADD EXPORT LINE HERE ---
+Export.image.toDrive({
+  image: clustered,  // The clustered image
+  description: 'Clustered_NDVI_Arkansas_HUC2_30m',  // Name of the export task
+  folder: 'EarthEngineExports',  // Google Drive folder name (optional)
+  fileNamePrefix: 'Clustered_NDVI_Arkansas_HUC2_30m',  // Output file name
+  scale: 30,  // Spatial resolution in meters
+  region: arkansasHUC2.geometry(),  // Export region (HUC-2 boundary)
+  maxPixels: 1e13,  // Maximum pixels allowed for export
+  crs: 'EPSG:4326',  // Set the CRS (coordinate reference system)
+  fileFormat: 'GeoTIFF'  // Export format as GeoTIFF
+});
+// Print the clustered image to the console for verification
+print('Clustered NDVI Arkansas HUC-2:', clustered);
+
+// --- ADD EXPORT LINE HERE ---
+Export.image.toDrive({
+  image: clustered,  // The clustered image
+  description: 'Clustered_NDVI_Arkansas_HUC2_30m',  // Name of the export task
+  folder: 'EarthEngineExports',  // Google Drive folder name (optional)
+  fileNamePrefix: 'Clustered_NDVI_Arkansas_HUC2_30m',  // Output file name
+  scale: 30,  // Spatial resolution in meters
+  region: arkansasHUC2.geometry(),  // Export region (HUC-2 boundary)
+  maxPixels: 1e13,  // Maximum pixels allowed for export
+  crs: 'EPSG:4326',  // Set the CRS (coordinate reference system)
+  fileFormat: 'GeoTIFF'  // Export format as GeoTIFF
+});
