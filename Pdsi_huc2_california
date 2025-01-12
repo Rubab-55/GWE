@@ -1,0 +1,75 @@
+// Load the GRIDMET Drought: CONUS Drought Indices dataset
+var droughtData = ee.ImageCollection('GRIDMET/DROUGHT');
+
+// Define the HUC-2 region for California
+var westernHUC2 = ee.FeatureCollection("USGS/WBD/2017/HUC02")
+  .filter(ee.Filter.eq('huc2', '18'))
+  .map(function(feature) {
+    return feature.simplify(1000);  // Simplify the geometry of each feature
+  });
+
+// Define years for the time series
+var years = [2015, 2016, 2017, 2018, 2019, 2020, 2021, 2022, 2023];
+
+// Function to calculate the annual average PDSI
+function calculatePDSIForHUC2(region, year) {
+  var startDate = ee.Date.fromYMD(year, 1, 1);
+  var endDate = ee.Date.fromYMD(year, 12, 31);
+  var annualPDSI = droughtData.filterDate(startDate, endDate)
+    .filterBounds(region.geometry())
+    .select('pdsi')
+    .mean()
+    .clip(region.geometry());
+  return annualPDSI.set('year', year);
+}
+
+// Calculate the time series and visualize on the map
+years.forEach(function(year) {
+  var pdsiImage = calculatePDSIForHUC2(westernHUC2, year).visualize({
+    min: -10,
+    max: 10,
+    palette: ['FF0000', 'FFA500', 'FFFF00', '00FF00', '00FFFF', '0000FF', '800080']
+  });
+  
+  Map.addLayer(pdsiImage, {}, 'PDSI ' + year);
+});
+
+// Center the map over the Western HUC-2 region
+Map.centerObject(westernHUC2, 6);
+
+// Calculate the time series
+var westernPDSITimeSeries = years.map(function(year) {
+  var pdsiValue = calculatePDSIForHUC2(westernHUC2, year).reduceRegion({
+    reducer: ee.Reducer.mean(),
+    geometry: westernHUC2.geometry(),
+    scale: 10000,
+    maxPixels: 1e12
+  }).get('pdsi');
+  return ee.Feature(null, {year: year, pdsi: pdsiValue});
+});
+
+// Convert to a FeatureCollection
+var westernPDSITimeSeriesCollection = ee.FeatureCollection(westernPDSITimeSeries);
+
+// Create and display the time series chart
+var westernChart = ui.Chart.feature.byFeature(westernPDSITimeSeriesCollection, 'year', 'pdsi')
+  .setChartType('LineChart')
+  .setOptions({
+    title: 'PDSI Time Series for Western HUC-2 Region (California)',
+    hAxis: {title: 'Year'},
+    vAxis: {title: 'PDSI'},
+    lineWidth: 2,
+    pointSize: 5,
+    series: {
+      0: {color: 'FF0000'}
+    }
+  });
+
+print(westernChart);
+
+// Export the time series as a CSV file to Google Drive
+Export.table.toDrive({
+  collection: westernPDSITimeSeriesCollection,
+  description: 'Western_HUC2_PDSI_TimeSeries',
+  fileFormat: 'CSV'
+});
