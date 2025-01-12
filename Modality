@@ -1,0 +1,83 @@
+// Define the geometry for the Southwest United States
+var southwestUS = ee.Geometry.Rectangle([-125, 31, -102, 37]);
+
+// Define the date range for the year 2021
+var yearStartDate = '2021-01-01';
+var yearEndDate = '2021-12-31';
+
+// Load the SRTM Digital Elevation Data
+var srtm = ee.Image('USGS/SRTMGL1_003');
+
+// Define a land mask: elevation > 0
+var landMask = srtm.gt(0);
+
+// Cloud masking and scaling function
+function maskL8sr(image) {
+  image = image.updateMask(landMask).clip(southwestUS);
+  var qaMask = image.select('QA_PIXEL').bitwiseAnd(parseInt('11111', 2)).eq(0);
+  var saturationMask = image.select('QA_RADSAT').eq(0);
+
+  var opticalBands = image.select('SR_B.').multiply(0.0000275).add(-0.2);
+  var thermalBands = image.select('ST_B.*').multiply(0.00341802).add(149.0);
+
+  return image.addBands(opticalBands, null, true)
+      .addBands(thermalBands, null, true)
+      .updateMask(qaMask)
+      .updateMask(saturationMask);
+}
+
+// Function to compute NDVI
+function ndvi(image) {
+  var ndvi_image = image.normalizedDifference(['SR_B5', 'SR_B4']).rename('NDVI');
+  return image.addBands(ndvi_image);
+}
+
+// Load the Landsat 8 Collection 2 Level 2 dataset for the year 2021
+var landsatCollection = ee.ImageCollection('LANDSAT/LC08/C02/T1_L2')
+  .filterBounds(southwestUS)
+  .filterDate(yearStartDate, yearEndDate)
+  .filter(ee.Filter.lt('CLOUD_COVER', 5))
+  .map(maskL8sr)
+  .map(ndvi);
+
+// Function to compute the slope of NDVI to determine phenology peaks
+function computeSlope(current, previous) {
+  var slope = current.select('NDVI').subtract(previous.select('NDVI')).rename('Slope');
+  return current.addBands(slope);
+}
+
+// Create a list of images with the previous image for each date
+var initial = ee.List([landsatCollection.first()]);
+var slopeCollection = ee.ImageCollection(ee.List(landsatCollection.iterate(function(image, list) {
+  var previousImage = ee.Image(ee.List(list).get(-1));
+  var slopeImage = computeSlope(image, previousImage);
+  return ee.List(list).add(slopeImage);
+}, initial)).slice(1));
+
+// Identify phenology peaks
+var phenologyPeaks = slopeCollection.map(function(image) {
+  return image.select('Slope').gt(0).rename('Peaks');
+});
+
+// Identify mono and multi-modality based on the number of peaks
+var peakSum = phenologyPeaks.sum();
+var monoModality = peakSum.lte(1).rename('Modality').multiply(1);  // Assign 1 for mono-modality
+var multiModality = peakSum.gt(1).rename('Modality').multiply(2);  // Assign 2 for multi-modality
+
+// Combine mono and multi-modality into one image
+var combinedModality = monoModality.add(multiModality);
+
+// Visualization parameters
+var modalityParams = {
+  min: 1,
+  max: 2,
+  palette: ['green', 'red'],
+  labels: ['Mono Modality', 'Multi Modality']
+};
+
+// Add the combined modality layer to the map
+Map.centerObject(southwestUS, 6);
+Map.addLayer(combinedModality, modalityParams, 'Mono and Multi Modality');
+
+// Print results to console
+print('Combined Modality:', combinedModality);
