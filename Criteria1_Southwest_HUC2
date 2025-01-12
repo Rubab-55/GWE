@@ -1,0 +1,317 @@
+// Define the geometries for the Southwest, Pacific Northwest, and California
+var southwestUS = ee.Geometry.Rectangle([-125, 31, -102, 37]);
+var pacificNorthwest = ee.Geometry.Rectangle([-125, 42, -116, 49]);
+var california = ee.Geometry.Rectangle([-125, 32, -114, 42]);
+
+// Define the date range for the dry season in 2021 (March to May)
+var dryStartDate = '2021-03-01';
+var dryEndDate = '2021-05-31';
+
+// Load the SRTM Digital Elevation Data
+var srtm = ee.Image('USGS/SRTMGL1_003');
+
+// Define a land mask: elevation > 0
+var landMask = srtm.gt(0);
+
+// Cloud masking and scaling function
+function maskL8sr(image) {
+  var qaMask = image.select('QA_PIXEL').bitwiseAnd(parseInt('11111', 2)).eq(0);
+  var saturationMask = image.select('QA_RADSAT').eq(0);
+
+  var opticalBands = image.select('SR_B.').multiply(0.0000275).add(-0.2);
+  var thermalBands = image.select('ST_B.*').multiply(0.00341802).add(149.0);
+
+  return image.updateMask(qaMask).updateMask(saturationMask)
+      .addBands(opticalBands, null, true)
+      .addBands(thermalBands, null, true);
+}
+
+// Function to compute NDVI
+function computeNDVI(image) {
+  var ndvi = image.normalizedDifference(['SR_B5', 'SR_B4']).rename('NDVI');
+  return ndvi;
+}
+
+// Load Landsat 8 Collection 2 Level 2 data for the dry season and filter by date and cloud cover
+var landsatCollection = ee.ImageCollection('LANDSAT/LC08/C02/T1_L2')
+  .filterDate(dryStartDate, dryEndDate)
+  .filter(ee.Filter.lt('CLOUD_COVER', 5))
+  .map(maskL8sr)
+  .map(computeNDVI);
+
+// Compute the median NDVI for the dry season
+var medianNDVI = landsatCollection.median().select('NDVI');
+
+// Load HUC-2 boundaries
+var huc2 = ee.FeatureCollection("USGS/WBD/2017/HUC02");
+
+// Filter HUC-2 boundaries by regions
+var huc2Southwest = huc2.filterBounds(southwestUS);
+var huc2PacificNorthwest = huc2.filterBounds(pacificNorthwest);
+var huc2California = huc2.filterBounds(california);
+
+// Combine all HUC-2 boundaries
+var combinedHUC2 = huc2Southwest.merge(huc2PacificNorthwest).merge(huc2California);
+
+// Simplify the HUC-2 boundaries to reduce complexity
+var simplifiedHUC2 = combinedHUC2.map(function(feature) {
+  return feature.simplify(1000);  // Adjust tolerance as needed
+});
+
+// Clip the NDVI image to the simplified HUC-2 boundaries
+var clippedNDVI = medianNDVI.clipToCollection(simplifiedHUC2);
+
+// Load the NLCD dataset
+var nlcd = ee.ImageCollection('USGS/NLCD_RELEASES/2016_REL')
+  .filter(ee.Filter.eq('system:index', '2016'))
+  .first()
+  .select('landcover');
+
+// Mask out developed areas, croplands, and urban classes
+var developedClasses = [21, 22, 23, 24, 81, 82];
+var nlcdMask = nlcd.remap(developedClasses, ee.List.repeat(0, developedClasses.length), 1);
+
+// Apply the mask to the NDVI and clipped NDVI images
+var maskedNDVI = clippedNDVI.updateMask(nlcdMask);
+var maskedClippedNDVI = maskedNDVI.updateMask(landMask);
+
+// Function to run k-means clustering on each HUC-2 region
+function clusterHUC2(feature) {
+  var huc2Geometry = feature.geometry();
+  var huc2MaskedNDVI = maskedClippedNDVI.clip(huc2Geometry);
+
+  // Define the region for sampling
+  var samplingRegion = huc2Geometry;
+
+  // Run k-means clustering with fewer sample points
+  var training = huc2MaskedNDVI.sample({
+    region: samplingRegion,
+    scale: 30,
+    numPixels: 500,  // Reduced number of sample points
+    geometries: true
+  });
+
+  var clusterer = ee.Clusterer.wekaKMeans(5).train(training);
+
+  var clustered = huc2MaskedNDVI.cluster(clusterer);
+
+  // Calculate mean NDVI for each cluster
+  var clusterMeans = ee.List.sequence(0, 4).map(function(clusterIndex) {
+    var meanNDVI = huc2MaskedNDVI.updateMask(clustered.eq(ee.Image.constant(clusterIndex))).reduceRegion({
+      reducer: ee.Reducer.mean(),
+      geometry: samplingRegion,
+      scale: 30,
+      bestEffort: true
+    }).get('NDVI');
+    return ee.Feature(null, {clusterIndex: clusterIndex, meanNDVI: meanNDVI});
+  });
+
+  // Convert the list of features to a feature collection
+  var clusterMeanFeatures = ee.FeatureCollection(clusterMeans);
+
+  // Sort the feature collection by mean NDVI
+  var sortedClusterMeans = clusterMeanFeatures.sort('meanNDVI');
+
+  // Extract sorted cluster indices
+  var sortedClusterIndices = sortedClusterMeans.aggregate_array('clusterIndex');
+  var clusterRanks = ee.List.sequence(1, 5);
+
+  // Create an image where each pixel is assigned the value of its respective group's rank
+  var rankedClusters = clustered.remap(sortedClusterIndices, clusterRanks);
+  return rankedClusters.clip(huc2Geometry).visualize({min: 1, max: 5, palette: ['red', 'orange', 'yellow', 'green', 'darkgreen']});
+}
+
+// Apply clustering to each HUC-2 region and mosaic the results
+var rankedClustersCollection = ee.ImageCollection(simplifiedHUC2.map(clusterHUC2)).mosaic();
+
+// Run k-means clustering on the entire region without considering HUCs
+function clusterGlobal(feature) {
+  var geometry = feature.geometry();
+  var maskedNDVI = clippedNDVI.clip(geometry);
+
+  // Define the region for sampling
+  var samplingRegion = geometry;
+
+  // Run k-means clustering with fewer sample points
+  var training = maskedNDVI.sample({
+    region: samplingRegion,
+    scale: 30,
+    numPixels: 500,  // Reduced number of sample points
+    geometries: true
+  });
+
+  var clusterer = ee.Clusterer.wekaKMeans(5).train(training);
+
+  var clustered = maskedNDVI.cluster(clusterer);
+
+  // Calculate mean NDVI for each cluster
+  var clusterMeans = ee.List.sequence(0, 4).map(function(clusterIndex) {
+    var meanNDVI = maskedNDVI.updateMask(clustered.eq(ee.Image.constant(clusterIndex))).reduceRegion({
+      reducer: ee.Reducer.mean(),
+      geometry: samplingRegion,
+      scale: 30,
+      bestEffort: true
+    }).get('NDVI');
+    return ee.Feature(null, {clusterIndex: clusterIndex, meanNDVI: meanNDVI});
+  });
+
+  // Convert the list of features to a feature collection
+  var clusterMeanFeatures = ee.FeatureCollection(clusterMeans);
+
+  // Sort the feature collection by mean NDVI
+  var sortedClusterMeans = clusterMeanFeatures.sort('meanNDVI');
+
+  // Extract sorted cluster indices
+  var sortedClusterIndices = sortedClusterMeans.aggregate_array('clusterIndex');
+  var clusterRanks = ee.List.sequence(1, 5);
+
+  // Create an image where each pixel is assigned the value of its respective group's rank
+  var rankedClusters = clustered.remap(sortedClusterIndices, clusterRanks);
+  return rankedClusters.visualize({min: 1, max: 5, palette: ['red', 'orange', 'yellow', 'green', 'darkgreen']});
+}
+
+// Apply clustering to each chunk and mosaic the results
+var globalChunks = simplifiedHUC2.map(clusterGlobal);
+var rankedClustersGlobal = ee.ImageCollection(globalChunks).mosaic();
+
+// Define cluster visualization parameters
+var clusterVisParams = {
+  min: 1,
+  max: 5,
+  palette: ['red', 'orange', 'yellow', 'green', 'darkgreen']
+};
+
+// Define NDVI visualization parameters using jet color palette
+var ndviParams = {
+  min: -1,
+  max: 1,
+  palette: ['#000080', '#0000FF', '#00FFFF', '#00FF00', '#FFFF00', '#FF0000', '#800000']
+};
+
+// Define visualization parameters for HUC-2 boundaries
+var huc2VisParams = {
+  color: 'black',
+  width: 1,
+  fillColor: '00000000'
+};
+
+// Add HUC-2 boundaries to the map
+Map.addLayer(simplifiedHUC2.style(huc2VisParams), {}, 'HUC-2 Boundaries');
+
+// Add masked NDVI layer to the map
+Map.addLayer(maskedClippedNDVI.visualize(ndviParams), {}, 'Masked NDVI');
+
+// Add ranked clustered NDVI layer by HUC-2 to the map
+Map.addLayer(rankedClustersCollection, {}, 'Ranked Clustered NDVI by HUC-2');
+
+// Add ranked clustered NDVI layer without considering HUCs to the map
+Map.addLayer(rankedClustersGlobal, {}, 'Ranked Clustered NDVI without HUCs');
+
+// Add the NLCD layer to the map
+var nlcdVisParams = {
+  min: 0,
+  max: 95,
+  palette: [
+    '466b9f', 'd1def8', 'dec5c5', 'd99282', 'eb0000', 'ab0000', 'b3aea3', '68ab63',
+    '1c6330', 'b5ca8f', 'af963c', 'ccb879', 'dfdfc2', 'd1d182', 'a3cc51', '82ba9e',
+    'dcd939', 'ab7028', 'bad8ea', '70a3ba'
+  ],
+  opacity: 0.5
+};
+
+Map.addLayer(nlcd, nlcdVisParams, 'NLCD 2016');
+
+// Create and add the NLCD legend
+var nlcdLegend = ui.Panel({style: {position: 'bottom-left', padding: '8px 15px'}});
+var nlcdLegendTitle = ui.Label({value: 'NLCD 2016', style: {fontWeight: 'bold', fontSize: '12px'}});
+
+var nlcdLegendItems = [
+  {color: '466b9f', name: 'Open Water'},
+  {color: 'd1def8', name: 'Perennial Ice/Snow'},
+  {color: 'dec5c5', name: 'Developed, Open Space'},
+  {color: 'd99282', name: 'Developed, Low Intensity'},
+  {color: 'eb0000', name: 'Developed, Medium Intensity'},
+  {color: 'ab0000', name: 'Developed, High Intensity'},
+  {color: 'b3aea3', name: 'Barren Land (Rock/Sand/Clay)'},
+  {color: '68ab63', name: 'Deciduous Forest'},
+  {color: '1c6330', name: 'Evergreen Forest'},
+  {color: 'b5ca8f', name: 'Mixed Forest'},
+  {color: 'af963c', name: 'Shrub/Scrub'},
+  {color: 'ccb879', name: 'Grassland/Herbaceous'},
+  {color: 'dfdfc2', name: 'Pasture/Hay'},
+  {color: 'd1d182', name: 'Cultivated Crops'},
+  {color: 'a3cc51', name: 'Woody Wetlands'},
+  {color: '82ba9e', name: 'Emergent Herbaceous Wetlands'},
+  {color: 'dcd939', name: 'Wetlands'},
+  {color: 'ab7028', name: 'Croplands'},
+  {color: 'bad8ea', name: 'Urban'},
+  {color: '70a3ba', name: 'Grassland/Shrubland'}
+];
+
+nlcdLegend.add(nlcdLegendTitle);
+nlcdLegendItems.forEach(function(item) {
+  nlcdLegend.add(ui.Panel({
+    widgets: [
+      ui.Label({
+        style: {
+          backgroundColor: '#' + item.color,
+          padding: '8px',
+          margin: '0 0 4px 0'
+        }
+      }),
+      ui.Label({
+        value: item.name,
+        style: {margin: '0 0 4px 6px'}
+      })
+    ],
+    layout: ui.Panel.Layout.Flow('horizontal')
+  }));
+});
+
+Map.add(nlcdLegend);
+
+// Center the map on the regions separately to ensure proper display
+Map.centerObject(southwestUS, 5);
+Map.centerObject(pacificNorthwest, 5);
+Map.centerObject(california, 5);
+
+// Create a legend for the ranked clustered NDVI
+var legend = ui.Panel({style: {position: 'bottom-right', padding: '8px 15px'}});
+var legendTitle = ui.Label({value: 'Ranked NDVI Clusters', style: {fontWeight: 'bold', fontSize: '12px'}});
+
+var makeRow = function(color, name) {
+  var colorBox = ui.Label({
+    style: {
+      backgroundColor: color,
+      padding: '8px',
+      margin: '0 0 4px 0'
+    }
+  });
+
+  var description = ui.Label({
+    value: name,
+    style: {margin: '0 0 4px 6px'}
+  });
+
+  return ui.Panel({
+    widgets: [colorBox, description],
+    layout: ui.Panel.Layout.Flow('horizontal')
+  });
+};
+
+var clusterColors = ['red', 'orange', 'yellow', 'green', 'darkgreen'];
+var clusterNames = ['Very Low Vegetation (Rank 1)', 'Low Vegetation (Rank 2)', 'Moderate Vegetation (Rank 3)', 'High Vegetation (Rank 4)', 'Very High Vegetation (Rank 5)'];
+
+legend.add(legendTitle);
+for (var i = 0; i < clusterColors.length; i++) {
+  legend.add(makeRow(clusterColors[i], clusterNames[i]));
+}
+
+Map.add(legend);
+
+// Print the clustered images to the console for verification
+print('Ranked Clustered NDVI by HUC-2:', rankedClustersCollection);
+print('Ranked Clustered NDVI without HUCs:', rankedClustersGlobal);
+
+
+
