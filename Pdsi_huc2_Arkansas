@@ -1,0 +1,79 @@
+// Define the HUC-2 region for Arkansas HUC-2
+var arkansasHUC2 = ee.FeatureCollection("USGS/WBD/2017/HUC02")
+  .filter(ee.Filter.eq('huc2', '08'))
+  .map(function(feature) {
+    return feature.simplify(1000);  // Simplify the geometry to reduce complexity
+  });  // This line simplifies the geometry
+
+// Load the SRTM 30m Digital Elevation Data
+var srtm = ee.Image('USGS/SRTMGL1_003');
+
+// Clip the DEM to the Arkansas HUC-2 boundaries
+var clippedDEMArkansas = srtm.clipToCollection(arkansasHUC2);
+
+// Function to compute NDVI using Landsat 8 Collection 2
+function computeNDVI(image) {
+  var ndvi = image.normalizedDifference(['SR_B5', 'SR_B4']).rename('NDVI');
+  return ndvi;
+}
+
+// Define the date range for the dry season in the Arkansas region
+var dryStartDate = '2021-10-01';
+var dryEndDate = '2021-11-30';
+
+// Load Landsat 8 Collection 2 surface reflectance data for the dry season
+var landsat8Collection = ee.ImageCollection('LANDSAT/LC08/C02/T1_L2')
+  .filterDate(dryStartDate, dryEndDate)
+  .filter(ee.Filter.lt('CLOUD_COVER', 40))
+  .map(function(image) {
+    return image.select(['SR_B5', 'SR_B4']).multiply(0.0000275).add(-0.2);
+  })
+  .map(computeNDVI);
+
+// Compute the median NDVI for the dry season
+var medianNDVI = landsat8Collection.median().select('NDVI');
+
+// Clip the NDVI image to the simplified Arkansas HUC-2 boundaries
+var clippedNDVIArkansas = medianNDVI.clipToCollection(arkansasHUC2);
+
+// Sample points for clustering
+var training = clippedNDVIArkansas.sample({
+  region: arkansasHUC2.geometry(),
+  scale: 30,
+  numPixels: 1000,
+  geometries: true
+});
+
+var sampleSize = training.size();
+print('Sample size:', sampleSize);
+
+if (sampleSize.gt(0)) {
+  // Apply k-means clustering with 5 clusters
+  var clusterer = ee.Clusterer.wekaKMeans(5).train(training);
+  var clustered = clippedNDVIArkansas.cluster(clusterer);
+
+  // Remap the cluster values to 1 through 5
+  var remappedClustered = clustered.remap([0, 1, 2, 3, 4], [1, 2, 3, 4, 5]);
+
+  // Mask out any zero values
+  var maskedClustered = remappedClustered.updateMask(remappedClustered.gt(0));
+
+  // Add the remapped clustered NDVI layer to the map
+  Map.addLayer(maskedClustered, {min: 1, max: 5, palette: ['FF0000', 'FFA500', 'FFFF00', '00FF00', '008000']}, 'Remapped Clustered NDVI Arkansas HUC-2');
+
+  // --- EXPORT FINAL REMAPPED CLUSTER IMAGE ---
+  Export.image.toDrive({
+    image: maskedClustered,
+    description: 'Final_Ranked_Clusters_NDVI_Arkansas_HUC2_2021',
+    folder: 'EarthEngineExports',
+    fileNamePrefix: 'Final_Ranked_Clusters_NDVI_Arkansas_HUC2_2021',
+    scale: 30,
+    region: arkansasHUC2.geometry(),  // Export the simplified geometry
+    maxPixels: 1e13,
+    crs: 'EPSG:4326',
+    fileFormat: 'GeoTIFF'
+  });
+
+} else {
+  print('No data was found in the training input. Try adjusting the date range or cloud cover threshold.');
+}
