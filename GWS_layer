@@ -1,0 +1,144 @@
+// Load the Global Surface Water dataset
+var gsw = ee.Image('JRC/GSW1_0/GlobalSurfaceWater');
+
+// Define mainland US boundaries
+var countries = ee.FeatureCollection('USDOS/LSIB_SIMPLE/2017');
+var mainlandUS = countries
+  .filter(ee.Filter.eq('country_na', 'United States'))
+  .filterBounds(ee.Geometry.BBox(-125, 24, -66, 50));  // Approximate bounds for the contiguous US
+
+// Define a color palette for the water layers
+var VIS_UNIFORM = {
+  min: 0,
+  max: 100,
+  palette: ['#808080', 'cyan', 'blue'] // Grey for 0%, blue for 100%
+};
+
+// Clip each water layer to mainland US and add to the map
+var occurrence = gsw.select('occurrence').clip(mainlandUS);
+Map.addLayer(occurrence, VIS_UNIFORM, 'Water Occurrence (1984-2015)');
+
+var change_abs = gsw.select('change_abs').clip(mainlandUS);
+Map.addLayer(change_abs, VIS_UNIFORM, 'Water Change Absolute (1984-2015)');
+
+var recurrence = gsw.select('recurrence').clip(mainlandUS);
+Map.addLayer(recurrence, VIS_UNIFORM, 'Water Recurrence (1984-2015)');
+
+var seasonality = gsw.select('seasonality').clip(mainlandUS);
+Map.addLayer(seasonality, VIS_UNIFORM, 'Water Seasonality (1984-2015)');
+
+// Define visualization parameters for Woody Wetlands only, with orange color
+var WOODY_WETLAND_VIS = {
+  palette: ['ff7f00'], // Orange color for Woody Wetlands
+  min: 90,
+  max: 90
+};
+
+// Function to add NLCD layer for Woody Wetlands for specific years
+function addWoodyWetlandLayer(year) {
+  var nlcd = ee.Image('USGS/NLCD_RELEASES/2019_REL/NLCD/' + year)
+    .select('landcover')
+    .eq(90) // Keep only Woody Wetlands (class value 90)
+    .selfMask() // Mask out other classes
+    .clip(mainlandUS);
+  Map.addLayer(nlcd, WOODY_WETLAND_VIS, 'Woody Wetlands (' + year + ')');
+}
+
+// Add Woody Wetlands layers for multiple years
+[2001, 2006, 2011, 2016, 2019].forEach(addWoodyWetlandLayer);
+
+// Add DEM layer with 30 m resolution
+var dem = ee.Image('USGS/SRTMGL1_003').clip(mainlandUS);
+var DEM_VIS = {
+  min: 0,
+  max: 3000,
+  palette: ['blue', 'green', 'yellow', 'orange', 'red']
+};
+Map.addLayer(dem, DEM_VIS, 'Digital Elevation Model (30m)');
+
+// Export Water Occurrence layer as a 30 m resolution GeoTIFF to Google Drive
+Export.image.toDrive({
+  image: occurrence.reproject({
+    crs: 'EPSG:5070',  // Use a projected CRS for continental US (Albers Equal Area)
+    scale: 30  // Set the scale to 30 m
+  }),
+  description: 'Water_Occurrence_1984_2015',
+  folder: 'EarthEngineExports', // Specify the folder in Google Drive
+  fileNamePrefix: 'Water_Occurrence_1984_2015',
+  region: mainlandUS.geometry().bounds(),
+  maxPixels: 1e13  // Allow for a large export area
+});
+
+// Create a color bar legend for Water Occurrence
+var waterLegend = ui.Panel({
+  style: {
+    position: 'bottom-right',
+    padding: '8px 15px'
+  }
+});
+
+// Title for Water Occurrence legend
+var waterLegendTitle = ui.Label({
+  value: 'Water Occurrence (%)',
+  style: {fontWeight: 'bold', fontSize: '16px', margin: '0 0 4px 0', padding: '0'}
+});
+waterLegend.add(waterLegendTitle);
+
+// Color bar for Water Occurrence
+var makeColorBar = function(palette) {
+  var colorBar = ui.Panel({
+    layout: ui.Panel.Layout.flow('horizontal'),
+    style: {stretch: 'horizontal', height: '12px'}
+  });
+  palette.forEach(function(color) {
+    colorBar.add(ui.Label({
+      style: {
+        backgroundColor: color,
+        padding: '10px'
+      }
+    }));
+  });
+  return colorBar;
+};
+waterLegend.add(makeColorBar(VIS_UNIFORM.palette));
+
+// Add min and max labels
+var minLabel = ui.Label(VIS_UNIFORM.min + '%', {margin: '4px 8px'});
+var maxLabel = ui.Label(VIS_UNIFORM.max + '%', {margin: '4px 8px'});
+waterLegend.add(ui.Panel({
+  widgets: [minLabel, ui.Label({stretch: 'horizontal'}), maxLabel],
+  layout: ui.Panel.Layout.flow('horizontal')
+}));
+
+// Add the Water Occurrence legend to the map
+Map.add(waterLegend);
+
+// Create a color bar legend for Woody Wetlands
+var wetlandLegend = ui.Panel({
+  style: {
+    position: 'bottom-left',
+    padding: '8px 15px'
+  }
+});
+
+// Title for Woody Wetland legend
+var wetlandLegendTitle = ui.Label({
+  value: 'Woody Wetlands',
+  style: {fontWeight: 'bold', fontSize: '16px', margin: '0 0 4px 0', padding: '0'}
+});
+wetlandLegend.add(wetlandLegendTitle);
+
+// Add color box for Woody Wetlands in orange
+var colorBox = ui.Label('', {
+  backgroundColor: 'ff7f00',
+  padding: '10px',
+  margin: '0 0 4px 0'
+});
+var description = ui.Label('Woody Wetlands', {margin: '0 0 4px 6px'});
+wetlandLegend.add(ui.Panel({
+  widgets: [colorBox, description],
+  layout: ui.Panel.Layout.Flow('horizontal')
+}));
+
+// Add the Woody Wetlands legend to the map
+Map.add(wetlandLegend);
