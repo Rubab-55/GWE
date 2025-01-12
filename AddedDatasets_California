@@ -1,0 +1,155 @@
+// --- Step 1: Define regions for each criterion ---
+
+// Define the HUC-2 region for California (from criteria 1 and 2)
+var californiaHUC2 = ee.FeatureCollection("USGS/WBD/2017/HUC02")
+  .filter(ee.Filter.eq('huc2', '18'));
+
+// Simplify the geometry for California
+var simplifiedCaliforniaHUC2 = californiaHUC2.geometry().simplify(500);
+
+// Define the date range for criteria 1 (California) dry season
+var dryStartDate = '2021-06-01';
+var dryEndDate = '2021-08-31';
+
+// Define the date range for criteria 3 (California) from July 1990 to July 2023
+var criteria3StartDate = '1990-07-01';
+var criteria3EndDate = '2023-07-31';
+
+// --- Step 2: Clustered NDVI for Criteria 1 (Dry Season NDVI) ---
+
+// Function to compute NDVI for Sentinel-2
+function computeNDVISentinel(image) {
+  var ndvi = image.normalizedDifference(['B8', 'B4']).rename('NDVI');
+  return ndvi;
+}
+
+// Load Sentinel-2 data for criteria 1 and compute median NDVI
+var sentinel2Collection = ee.ImageCollection('COPERNICUS/S2_SR')
+  .filterDate(dryStartDate, dryEndDate)
+  .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 20))
+  .select(['B8', 'B4'])  // Select only the necessary bands for NDVI
+  .map(computeNDVISentinel);
+
+var medianNDVI1 = sentinel2Collection.median().select('NDVI').clip(simplifiedCaliforniaHUC2);
+
+// Sample points and apply k-means clustering for criteria 1
+var training1 = medianNDVI1.sample({
+  region: simplifiedCaliforniaHUC2,
+  scale: 100,
+  numPixels: 1000,
+  geometries: true
+});
+var clusterer1 = ee.Clusterer.wekaKMeans(5).train(training1);
+var clustered1 = medianNDVI1.cluster(clusterer1);
+
+// --- Step 3: Clustered NDVI for Criteria 2 (Full Year NDVI) ---
+
+// Function to mask clouds and compute NDVI for Landsat
+function maskLandsat(image) {
+  var qaMask = image.select('QA_PIXEL').bitwiseAnd(31).eq(0);
+  var opticalBands = image.select(['SR_B5', 'SR_B4']);  // Select relevant bands
+  var ndvi = opticalBands.normalizedDifference(['SR_B5', 'SR_B4']).rename('NDVI');
+  return image.addBands(ndvi).updateMask(qaMask);
+}
+
+// Load Landsat 8 data for criteria 2 and compute median NDVI
+var landsatCollection2 = ee.ImageCollection("LANDSAT/LC08/C02/T1_L2")
+  .filterBounds(simplifiedCaliforniaHUC2)
+  .filterDate('2021-01-01', '2021-12-31')
+  .select(['SR_B5', 'SR_B4', 'QA_PIXEL'])  // Select only necessary bands
+  .map(maskLandsat);
+
+var medianNDVI2 = landsatCollection2.median().select('NDVI').clip(simplifiedCaliforniaHUC2);
+
+// Sample points and apply k-means clustering for criteria 2
+var training2 = medianNDVI2.sample({
+  region: simplifiedCaliforniaHUC2,
+  scale: 30,
+  numPixels: 500,
+  geometries: true
+});
+var clusterer2 = ee.Clusterer.wekaKMeans(5).train(training2);
+var clustered2 = medianNDVI2.cluster(clusterer2);
+
+// --- Step 4: Clustered NDVI for Criteria 3 (NDVI Std Dev from 1990-2023) ---
+
+// Load Landsat 8 data for criteria 3 and compute standard deviation of NDVI
+var landsatCollection3 = ee.ImageCollection("LANDSAT/LC08/C02/T1_L2")
+  .filterBounds(simplifiedCaliforniaHUC2)
+  .filterDate(criteria3StartDate, criteria3EndDate)
+  .filter(ee.Filter.calendarRange(7, 7, 'month'))
+  .select(['SR_B5', 'SR_B4', 'QA_PIXEL'])  // Select only necessary bands
+  .map(maskLandsat);
+
+var stdDevNDVI3 = landsatCollection3.select('NDVI').reduce(ee.Reducer.stdDev()).clip(simplifiedCaliforniaHUC2);
+
+// Sample points and apply k-means clustering for criteria 3
+var training3 = stdDevNDVI3.sample({
+  region: simplifiedCaliforniaHUC2,
+  scale: 30,
+  numPixels: 1000,
+  geometries: true
+});
+var clusterer3 = ee.Clusterer.wekaKMeans(5).train(training3);
+var clustered3 = stdDevNDVI3.cluster(clusterer3);
+
+// --- Step 5: Combine Clustered Images and Normalize to Range 3-15 ---
+
+// Define function to normalize clustered images to the range of 3-15
+function normalizeCluster(clusteredImage) {
+  var minClusterValue = ee.Number(clusteredImage.reduceRegion({
+    reducer: ee.Reducer.min(),
+    geometry: simplifiedCaliforniaHUC2,
+    scale: 30,
+    bestEffort: true
+  }).values().get(0));
+  
+  var maxClusterValue = ee.Number(clusteredImage.reduceRegion({
+    reducer: ee.Reducer.max(),
+    geometry: simplifiedCaliforniaHUC2,
+    scale: 30,
+    bestEffort: true
+  }).values().get(0));
+
+  return clusteredImage.unitScale(minClusterValue, maxClusterValue)
+    .multiply(12).add(3) // Scale to range [3, 15]
+    .rename('normalizedCluster');
+}
+
+// Normalize all clustered images
+var normalizedClustered1 = normalizeCluster(clustered1);
+var normalizedClustered2 = normalizeCluster(clustered2);
+var normalizedClustered3 = normalizeCluster(clustered3);
+
+// Combine the three normalized clustered images into one
+var combinedClustered = normalizedClustered1.add(normalizedClustered2).add(normalizedClustered3).divide(3);
+
+// --- Step 6: Display the Combined Layer ---
+
+// Visualization parameters for combined clusters
+var combinedVisParams = {
+  min: 3,
+  max: 15,
+  palette: ['FF0000', 'FFA500', 'FFFF00', '00FF00', '008000']
+};
+
+// Add the combined clustered image to the map
+Map.addLayer(combinedClustered, combinedVisParams, 'Combined Clustered NDVI');
+
+// Center the map on the California HUC-2 region
+Map.centerObject(simplifiedCaliforniaHUC2, 6);
+// --- Step 7: Export the Combined Layer as TIFF file ---
+
+// Set export parameters
+Export.image.toDrive({
+  image: combinedClustered,  // The image you want to export
+  description: 'Combined_Clustered_NDVI',  // A descriptive name for the export task
+  folder: 'EarthEngineExports',  // The folder in your Google Drive where the file will be saved (optional)
+  fileNamePrefix: 'Combined_Clustered_NDVI',  // The name of the exported file
+  scale: 30,  // Spatial resolution in meters
+  region: simplifiedCaliforniaHUC2,  // The region you want to export
+  maxPixels: 1e13,  // The maximum number of pixels you want to export (adjust if needed)
+  crs: 'EPSG:4326',  // Coordinate Reference System (default is WGS84, EPSG:4326)
+  fileFormat: 'GeoTIFF'  // The format of the exported file
+});
+
