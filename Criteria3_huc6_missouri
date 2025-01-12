@@ -1,0 +1,139 @@
+// Load HUC-6 boundaries for the Missouri River Basin (starting with HUC-6 code '10')
+var missouriHUC6 = ee.FeatureCollection("USGS/WBD/2017/HUC06")
+  .filter(ee.Filter.stringStartsWith('huc6', '10'))  // HUC-6 codes starting with '10' cover the Missouri River Basin
+  .map(function(feature) {
+    return feature.simplify(1000);  // Simplify to reduce computational complexity
+  });
+
+// Define the date ranges for 1990-2018 and 2018-2023
+var startDate1990 = '1990-07-01';
+var endDate2018 = '2018-12-31';
+var startDate2018 = '2019-01-01';
+var endDate2023 = '2023-07-31';
+
+// Load the NLCD dataset to exclude urban areas, water, farmlands, and pastures
+var nlcd = ee.Image('USGS/NLCD_RELEASES/2019_REL/NLCD/2019');
+
+// Create a mask to exclude urban, water, farmlands, and pastures
+var exclusionMask = nlcd.select('landcover').neq(21)  // Exclude Developed, Open Space
+  .and(nlcd.select('landcover').neq(22))  // Exclude Developed, Low Intensity
+  .and(nlcd.select('landcover').neq(23))  // Exclude Developed, Medium Intensity
+  .and(nlcd.select('landcover').neq(24))  // Exclude Developed, High Intensity
+  .and(nlcd.select('landcover').neq(11))  // Exclude Open Water
+  .and(nlcd.select('landcover').neq(81))  // Exclude Pasture/Hay
+  .and(nlcd.select('landcover').neq(82)); // Exclude Cultivated Crops
+
+// Cloud masking and scaling function
+function maskL8sr(image) {
+  var qaMask = image.select('QA_PIXEL').bitwiseAnd(parseInt('11111', 2)).eq(0);
+  var saturationMask = image.select('QA_RADSAT').eq(0);
+
+  var opticalBands = image.select('SR_B.').multiply(0.0000275).add(-0.2);
+  var thermalBands = image.select('ST_B.*').multiply(0.00341802).add(149.0);
+
+  return image.addBands(opticalBands, null, true)
+      .addBands(thermalBands, null, true)
+      .updateMask(qaMask)
+      .updateMask(saturationMask)
+      .updateMask(exclusionMask); // Apply the exclusion mask
+}
+
+// Function to compute NDVI
+function computeNDVI(image) {
+  var ndvi = image.normalizedDifference(['SR_B5', 'SR_B4']).rename('NDVI');
+  return image.addBands(ndvi);
+}
+
+// Function to process each HUC-6 unit for a specific time range
+function processRegion(regionGeom, regionName, startDate, endDate, descriptionSuffix) {
+  var landsatCollection = ee.ImageCollection("LANDSAT/LC08/C02/T1_L2")
+    .filterBounds(regionGeom)
+    .filterDate(startDate, endDate)
+    .filter(ee.Filter.lt('CLOUD_COVER', 10))  // Cloud cover filter
+    .map(maskL8sr)
+    .map(computeNDVI);
+
+  var stdDevNDVI = landsatCollection.select('NDVI').reduce(ee.Reducer.stdDev());
+  var stdDevNDVIClipped = stdDevNDVI.clip(regionGeom);
+
+  // Sample points for k-means clustering
+  var training = stdDevNDVIClipped.sample({
+    region: regionGeom,
+    scale: 90,  // Increase the scale to reduce computation time
+    numPixels: 500,  // Reduced number of sample points
+    geometries: true
+  });
+
+  // Apply k-means clustering
+  var clusterer = ee.Clusterer.wekaKMeans(5).train(training);
+  var clustered = stdDevNDVIClipped.cluster(clusterer);
+
+  // Calculate mean NDVI std dev for each cluster
+  var clusterMeans = ee.List.sequence(0, 4).map(function(clusterIndex) {
+    var meanNDVIStdDev = stdDevNDVIClipped.updateMask(clustered.eq(ee.Image.constant(clusterIndex))).reduceRegion({
+      reducer: ee.Reducer.mean(),
+      geometry: regionGeom,
+      scale: 90,
+      bestEffort: true
+    }).get('NDVI_stdDev');
+    return ee.Feature(null, {clusterIndex: clusterIndex, meanNDVIStdDev: meanNDVIStdDev});
+  });
+
+  // Sort the clusters by mean NDVI std dev
+  var clusterMeanFeatures = ee.FeatureCollection(clusterMeans);
+  var sortedClusterMeans = clusterMeanFeatures.sort('meanNDVIStdDev', false); // Sort descending
+  var sortedClusterIndices = sortedClusterMeans.aggregate_array('clusterIndex');
+
+  // Assign ranks to clusters
+  var clusterRanks = ee.List.sequence(1, 5); // 1 (highest std dev) to 5 (lowest std dev)
+  var rankedClusters = clustered.remap(sortedClusterIndices, clusterRanks);
+
+  // Apply exclusion mask to remove urban areas, water, farmlands, and pastures from the final clustered image
+  var finalRankedClusters = rankedClusters.updateMask(exclusionMask);
+
+  // Export the ranked clustered image for the given time period
+  Export.image.toDrive({
+    image: finalRankedClusters,  // The ranked clustered NDVI image with mask applied
+    description: 'Ranked_Clusters_NDVI_Missouri_HUC6_' + regionName + '_' + descriptionSuffix,  // Task description
+    folder: 'EarthEngineExports',  // Google Drive folder
+    fileNamePrefix: 'Ranked_Clusters_NDVI_Missouri_HUC6_' + regionName + '_' + descriptionSuffix,  // Output file name
+    scale: 90,  // Increase scale to reduce pixel count
+    region: regionGeom,  // Export region
+    maxPixels: 1e12,  // Reduce max pixels to avoid timeouts
+    crs: 'EPSG:4326',  // Coordinate Reference System
+    fileFormat: 'GeoTIFF'  // Output file format
+  });
+
+  return finalRankedClusters;
+}
+
+// Function to process HUC-6 regions in batches
+function processBatch(batch) {
+  batch.features.forEach(function(feature) {
+    var regionGeom = ee.Feature(feature).geometry();
+    var regionName = ee.Feature(feature).get('huc6').getInfo();  // Extract HUC6 code on the server-side
+
+    // Process 1990-2018 for each HUC-6 region
+    var processedRegion1990to2018 = processRegion(regionGeom, regionName, startDate1990, endDate2018, '1990to2018');
+
+    // Process 2018-2023 for each HUC-6 region
+    var processedRegion2018to2023 = processRegion(regionGeom, regionName, startDate2018, endDate2023, '2018to2023');
+
+    // Add to the map for visualization
+    Map.addLayer(processedRegion1990to2018, {min: 1, max: 5, palette: ['#ff0000', '#ff7f00', '#ffff00', '#7fff00', '#00ff00']}, 'Ranked Clusters 1990-2018 ' + regionName);
+    Map.addLayer(processedRegion2018to2023, {min: 1, max: 5, palette: ['#ff0000', '#ff7f00', '#ffff00', '#7fff00', '#00ff00']}, 'Ranked Clusters 2018-2023 ' + regionName);
+  });
+}
+
+// Split HUC-6 regions into batches
+var batchSize = 5;  // Adjust batch size based on the system limit
+missouriHUC6.evaluate(function(huc6Features) {
+  var totalFeatures = huc6Features.features.length;
+  for (var i = 0; i < totalFeatures; i += batchSize) {
+    var batch = {features: huc6Features.features.slice(i, i + batchSize)};
+    processBatch(batch);
+  }
+});
+
+// Set map center and zoom to fit the Missouri River Basin HUC-6 regions
+Map.centerObject(missouriHUC6, 6);
