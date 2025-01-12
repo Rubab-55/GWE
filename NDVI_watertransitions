@@ -1,0 +1,119 @@
+// Load the Global Surface Water dataset
+var dataset = ee.Image('JRC/GSW1_3/GlobalSurfaceWater');
+var waterTransition = dataset.select('transition');
+
+// Load your uploaded TIFF file as an asset
+var tiffAsset = ee.Image('projects/gwe-condonhydrologylab/assets/CONUS2_0_Final250m_Mask');
+
+// Create a mask from the TIFF to define the clipping region
+var tiffMask = tiffAsset.gt(0); // Consider only non-zero regions
+
+// Clip the water transition data to the TIFF mask
+var clippedTransition = waterTransition.updateMask(tiffMask);
+
+// Reclassify the transition categories:
+// Categories for "ever permanent water" (2): 1, 2, 3, 7, 8, 9
+var everPermanentWater = clippedTransition.eq(1) // Permanent
+  .or(clippedTransition.eq(2))                   // New permanent
+  .or(clippedTransition.eq(3))                   // Lost permanent
+  .or(clippedTransition.eq(7))                   // Seasonal to permanent
+  .or(clippedTransition.eq(8))                   // Permanent to seasonal
+  .or(clippedTransition.eq(9));                  // Ephemeral permanent
+
+// Categories for "ever water" (1): 4, 5, 6, 10
+var everWater = clippedTransition.eq(4) // Seasonal water
+  .or(clippedTransition.eq(5))           // New seasonal water
+  .or(clippedTransition.eq(6))           // Lost seasonal water
+  .or(clippedTransition.eq(10));         // Ephemeral seasonal
+
+// Combine the reclassified layers into a single raster
+var reclassified = everWater.multiply(1).add(everPermanentWater.multiply(2));
+
+// Load Landsat 8 surface reflectance data for 2021
+var landsat = ee.ImageCollection('LANDSAT/LC08/C02/T1_L2')
+  .filterDate('2021-01-01', '2021-12-31')
+  .filterBounds(tiffMask.geometry())
+  .map(function(image) {
+    // Calculate NDVI
+    var ndvi = image.normalizedDifference(['SR_B5', 'SR_B4']).rename('NDVI');
+    return image.addBands(ndvi);
+  })
+  .select('NDVI');
+
+// Mask NDVI with areas classified as 1 and 2
+var maskedNDVI = landsat.map(function(image) {
+  return image.updateMask(reclassified);
+});
+
+// Calculate mean NDVI for 2021
+var meanNDVI = maskedNDVI.mean();
+
+// Incorporate the NDVI palette with a gradient of green
+var ndviPalette = {
+  min: -1,
+  max: 1,
+  palette: [
+    '#e5ffe5', // Very light green for low NDVI
+    '#b3ffb3', // Light green
+    '#66ff66', // Medium green
+    '#00cc00', // Dark green
+    '#004d00'  // Very dark green for high NDVI
+  ]
+};
+
+// Visualize the mean NDVI with the green gradient palette
+Map.centerObject(tiffMask.geometry(), 6); // Center the map on the TIFF region
+Map.addLayer(meanNDVI, ndviPalette, 'Mean NDVI for 2021');
+
+// Create a colorbar for the green gradient palette
+var colorbar = ui.Panel({
+  style: {
+    position: 'bottom-left',
+    padding: '8px 15px',
+    backgroundColor: 'white'
+  }
+});
+
+var colorbarTitle = ui.Label({
+  value: 'NDVI',
+  style: {fontWeight: 'bold', fontSize: '16px', margin: '0 0 6px 0'}
+});
+colorbar.add(colorbarTitle);
+
+var paletteColors = ndviPalette.palette;
+var paletteLabels = [-1, -0.5, 0, 0.5, 1]; // Key NDVI values
+var makeRow = function(color, label) {
+  var colorBox = ui.Label({
+    style: {
+      backgroundColor: color,
+      padding: '8px',
+      margin: '0 4px 4px 0'
+    }
+  });
+
+  var description = ui.Label({
+    value: label.toString(),
+    style: {margin: '0 4px', fontSize: '12px'}
+  });
+
+  return ui.Panel({
+    widgets: [colorBox, description],
+    layout: ui.Panel.Layout.Flow('horizontal')
+  });
+};
+
+for (var i = 0; i < paletteColors.length; i++) {
+  colorbar.add(makeRow(paletteColors[i], paletteLabels[i]));
+}
+
+Map.add(colorbar);
+
+// Export the mean NDVI as a GeoTIFF
+Export.image.toDrive({
+  image: meanNDVI,
+  description: 'Mean_NDVI_2021_WaterClasses',
+  scale: 30, // Resolution in meters
+  region: tiffMask.geometry().bounds(), // Export only the area covered by the TIFF
+  maxPixels: 1e13,
+  fileFormat: 'GeoTIFF'
+});
