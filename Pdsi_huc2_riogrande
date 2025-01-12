@@ -1,0 +1,70 @@
+// Load the GRIDMET Drought: CONUS Drought Indices dataset
+var droughtData = ee.ImageCollection('GRIDMET/DROUGHT');
+
+// Define the HUC-2 region for Rio Grande (covers San Antonio and New Mexico)
+var rioGrandeHUC2 = ee.FeatureCollection("USGS/WBD/2017/HUC02")
+  .filter(ee.Filter.eq('huc2', '13'))
+  .geometry()  // Extract the geometry
+  .simplify(1000);  // Simplify the geometry
+
+// Define years for the time series
+var years = [2015, 2016, 2017, 2018, 2019, 2020, 2021, 2022, 2023];
+
+// Function to calculate the annual average PDSI
+function calculatePDSIForHUC2(region, year) {
+  var startDate = ee.Date.fromYMD(year, 1, 1);
+  var endDate = ee.Date.fromYMD(year, 12, 31);
+  var annualPDSI = droughtData.filterDate(startDate, endDate)
+    .filterBounds(region)
+    .select('pdsi')
+    .mean()
+    .clip(region);
+  return annualPDSI.set('year', year);
+}
+
+// Calculate the time series
+var rioGrandePDSITimeSeries = years.map(function(year) {
+  var pdsiValue = calculatePDSIForHUC2(rioGrandeHUC2, year).reduceRegion({
+    reducer: ee.Reducer.mean(),
+    geometry: rioGrandeHUC2,
+    scale: 10000,
+    maxPixels: 1e12
+  }).get('pdsi');
+  return ee.Feature(null, {year: year, pdsi: pdsiValue});
+});
+
+// Convert to a FeatureCollection
+var rioGrandePDSITimeSeriesCollection = ee.FeatureCollection(rioGrandePDSITimeSeries);
+
+// Export the time series as a CSV file to Google Drive
+Export.table.toDrive({
+  collection: rioGrandePDSITimeSeriesCollection,
+  description: 'RioGrande_HUC2_PDSI_TimeSeries',
+  fileFormat: 'CSV'
+});
+
+// Add the HUC-2 region to the map
+Map.centerObject(rioGrandeHUC2, 6);  // Center the map on the region
+Map.addLayer(rioGrandeHUC2, {color: 'blue'}, 'Rio Grande HUC-2 Region');
+
+// Loop through the years and add each PDSI layer to the map
+var pdsiLayers = years.map(function(year) {
+  var pdsiImage = calculatePDSIForHUC2(rioGrandeHUC2, year);
+  Map.addLayer(pdsiImage, {min: -5, max: 5, palette: ['red', 'white', 'green']}, 'PDSI ' + year);
+  return pdsiImage;
+});
+
+// Create a time series chart
+var chart = ui.Chart.feature.byFeature(rioGrandePDSITimeSeriesCollection, 'year', 'pdsi')
+  .setChartType('LineChart')
+  .setOptions({
+    title: 'PDSI Time Series for Rio Grande HUC-2 Region',
+    hAxis: {title: 'Year'},
+    vAxis: {title: 'PDSI'},
+    lineWidth: 2,
+    pointSize: 4,
+    series: {0: {color: 'blue'}}
+  });
+
+// Print the chart to the console
+print(chart);
