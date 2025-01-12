@@ -1,0 +1,71 @@
+// Load HUC-2 boundaries
+var huc2 = ee.FeatureCollection("USGS/WBD/2017/HUC02");
+
+// Define the bounding box for the mainland US
+var mainlandUS = ee.Geometry.Rectangle([-125, 24, -66, 50]);
+
+// Filter HUC-2 boundaries to only include those within the mainland US
+var huc2MainlandUS = huc2.filterBounds(mainlandUS);
+
+// Simplify the HUC-2 boundaries to reduce complexity
+var simplifiedHUC2 = huc2MainlandUS.map(function(feature) {
+  return feature.simplify(1000);  // Adjust tolerance as needed
+});
+
+// Convert the FeatureCollection to a List
+var huc2List = simplifiedHUC2.toList(simplifiedHUC2.size());
+
+// Create a list of IDs
+var ids = ee.List.sequence(1, huc2List.size());
+
+// Function to add unique IDs
+var addUniqueId = function(id) {
+  var feature = ee.Feature(huc2List.get(id.subtract(1)));
+  return feature.set('HUC_ID', id);
+};
+
+// Map the function over the list of IDs
+var featuresWithId = ids.map(addUniqueId);
+
+// Convert the list back to a FeatureCollection
+var huc2WithId = ee.FeatureCollection(featuresWithId);
+
+// Function to add labels to HUC features
+function addLabels(feature) {
+  var hucId = feature.get('HUC_ID');
+  var centroid = feature.geometry().centroid();
+  return ee.Feature(centroid, {label: hucId});
+}
+
+// Generate label features
+var labels = huc2WithId.map(addLabels);
+
+// Define visualization parameters for HUC-2 boundaries
+var huc2VisParams = {
+  color: 'black',
+  width: 1,
+  fillColor: '00000000'
+};
+
+// Add HUC-2 boundaries to the map
+Map.addLayer(huc2WithId.style(huc2VisParams), {}, 'HUC-2 Boundaries');
+
+// Function to add text labels to the map
+labels.evaluate(function(labelFeatures) {
+  labelFeatures.features.forEach(function(feature) {
+    var coordinates = feature.geometry().coordinates().getInfo();
+    var label = feature.get('label').getInfo();
+    var labelText = ui.Label({
+      value: label.toString(),
+      style: {
+        fontSize: '12px',
+        color: 'black'
+      }
+    });
+    var labelPoint = {lat: coordinates[1], lon: coordinates[0]};
+    Map.add(labelText.setPosition(labelPoint));
+  });
+});
+
+// Set map center and zoom to fit the mainland US
+Map.setCenter(-95, 37.5, 4);
