@@ -1,0 +1,115 @@
+// Load HUC-2 and HUC-6 boundaries
+var huc2 = ee.FeatureCollection("USGS/WBD/2017/HUC02");
+var huc6 = ee.FeatureCollection("USGS/WBD/2017/HUC06");
+
+// Define the California HUC2 region using HUC2 code '18'
+var californiaHUC2 = huc2.filter(ee.Filter.eq('huc2', '18')).geometry();
+
+// Simplify the region geometry to reduce computation load
+var simplifiedCaliforniaHUC2 = californiaHUC2.simplify(500);  // Reduce simplification tolerance for better detail
+
+// Filter HUC-6 regions that are within the California HUC-2 boundary
+var californiaHUC6 = huc6.filterBounds(californiaHUC2);  // Now properly defined
+
+// Define the date range for 2019-2023
+var startDate = '2019-01-01';
+var endDate = '2023-12-31';
+
+// Load the NLCD dataset to mask out urban areas, water, farmlands, and pastures
+var nlcd = ee.Image('USGS/NLCD_RELEASES/2019_REL/NLCD/2019');
+var exclusionMask = nlcd.select('landcover').eq(21)  // Urban areas
+  .or(nlcd.select('landcover').eq(22))
+  .or(nlcd.select('landcover').eq(23))
+  .or(nlcd.select('landcover').eq(24))
+  .or(nlcd.select('landcover').eq(11))  // Water bodies
+  .or(nlcd.select('landcover').eq(81))  // Pasture/Hay
+  .or(nlcd.select('landcover').eq(82)); // Cultivated Crops
+
+// Cloud masking and scaling
+function maskL8sr(image) {
+  var qaMask = image.select('QA_PIXEL').bitwiseAnd(31).eq(0); // Updated for 5-bit mask
+  var saturationMask = image.select('QA_RADSAT').eq(0);
+
+  // Apply the scaling factors to the appropriate bands.
+  var opticalBands = image.select('SR_B.').multiply(0.0000275).add(-0.2);
+  var thermalBands = image.select('ST_B.*').multiply(0.00341802).add(149.0);
+
+  // Replace the original bands with the scaled ones and apply the masks.
+  return image.addBands(opticalBands, null, true)
+      .addBands(thermalBands, null, true)
+      .updateMask(qaMask)
+      .updateMask(saturationMask)
+      .updateMask(exclusionMask.not());  // Exclude urban areas, water, farmlands, and pastures
+}
+
+// Function to compute NDVI
+function computeNDVI(image) {
+  var ndvi = image.normalizedDifference(['SR_B5', 'SR_B4']).rename('NDVI');
+  return image.addBands(ndvi);
+}
+
+// Function to process each HUC-6 region separately
+function processHUC6Region(huc6Region, regionName) {
+  var landsatCollection = ee.ImageCollection("LANDSAT/LC08/C02/T1_L2")
+    .filterBounds(huc6Region.geometry())  // Filter by each HUC-6 region's geometry
+    .filterDate(startDate, endDate)
+    .filter(ee.Filter.lt('CLOUD_COVER', 10))  // Relaxed cloud cover filter
+    .map(maskL8sr)
+    .map(computeNDVI);
+
+  // Fix: Reduce the collection with the correct number of arguments
+  var stdDevNDVIYear = landsatCollection.select('NDVI').reduce(ee.Reducer.stdDev());  // Use only the reducer
+  var stdDevNDVIYearClipped = stdDevNDVIYear.clip(huc6Region.geometry());
+
+  // Sample points for k-means clustering (reduce number of sample points)
+  var training = stdDevNDVIYearClipped.sample({
+    region: huc6Region.geometry(),
+    scale: 30,  // Maintain 30-meter resolution
+    numPixels: 300,  // Reduce the number of sample points to reduce memory load
+    geometries: true,
+    tileScale: 4  // Increase tileScale to handle more pixels
+  });
+
+  // Apply k-means clustering
+  var clusterer = ee.Clusterer.wekaKMeans(5).train(training);
+  var clustered = stdDevNDVIYearClipped.cluster(clusterer);
+
+  // Sort the clusters based on the standard deviation value
+  var sortedClusterIndices = ee.List.sequence(0, 4);
+  
+  // Assign ranks to clusters (1 = highest std dev, 5 = lowest std dev)
+  var clusterRanks = ee.List.sequence(1, 5);  // Ranks from 1 (highest std dev) to 5 (lowest std dev)
+  var rankedClusters = clustered.remap(sortedClusterIndices, clusterRanks);
+
+  // Return the ranked clusters image
+  return rankedClusters;
+}
+
+// Apply the process to each HUC-6 region within the California HUC-2
+var processedHUC6Regions = californiaHUC6.map(function(huc6Region) {
+  return processHUC6Region(huc6Region, 'HUC6 Region');
+});
+
+// Flatten the processed results
+var flattenedRegions = ee.ImageCollection(processedHUC6Regions).mosaic();
+
+// Define visualization parameters for the ranked clusters
+var clusterVisParams = {
+  min: 1,
+  max: 5,
+  palette: ['#d9f0d3', '#a6dba0', '#5aae61', '#1b7837', '#00441b']  // Flipped shades of green
+};
+
+// Add the flattened clusters to the map
+Map.addLayer(flattenedRegions, clusterVisParams, 'Ranked Clusters of NDVI Std Dev 2019-2023');
+
+// Export the clustered image as a TIFF file
+Export.image.toDrive({
+  image: flattenedRegions,  // Image to export
+  description: 'Ranked_NDVI_StdDev_Clusters_California_2019_2023_HUC6',
+  scale: 30,  // 30-meter resolution
+  region: simplifiedCaliforniaHUC2,  // The region to export (same as HUC-2 extent)
+  fileFormat: 'GeoTIFF',  // Output file format
+  crs: 'EPSG:4326',  // Coordinate reference system (WGS 84)
+  maxPixels: 1e13  // Max number of pixels (large limit to accommodate the export)
+});
