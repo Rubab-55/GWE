@@ -1,0 +1,169 @@
+// Define the geometry for the Southwest United States
+var southwestUS = ee.Geometry.Rectangle([-125, 31, -102, 37]);
+
+// Define the date range for the year 2021
+var yearStartDate = '2021-01-01';
+var yearEndDate = '2021-12-31';
+
+// Load the SRTM Digital Elevation Data
+var srtm = ee.Image('USGS/SRTMGL1_003');
+
+// Define a land mask: elevation > 0
+var landMask = srtm.gt(0);
+
+// Cloud masking and scaling function
+function maskL8sr(image) {
+  image = image.updateMask(landMask).clip(southwestUS);
+  var qaMask = image.select('QA_PIXEL').bitwiseAnd(parseInt('11111', 2)).eq(0);
+  var saturationMask = image.select('QA_RADSAT').eq(0);
+
+  var opticalBands = image.select('SR_B.').multiply(0.0000275).add(-0.2);
+  var thermalBands = image.select('ST_B.*').multiply(0.00341802).add(149.0);
+
+  return image.addBands(opticalBands, null, true)
+      .addBands(thermalBands, null, true)
+      .updateMask(qaMask)
+      .updateMask(saturationMask);
+}
+
+// Function to compute NDVI
+function ndvi(image) {
+  var ndvi_image = image.normalizedDifference(['SR_B5', 'SR_B4']).rename('NDVI');
+  return image.addBands(ndvi_image);
+}
+
+// Load the Landsat 8 Collection 2 Level 2 dataset for the year 2021
+var landsatCollection = ee.ImageCollection('LANDSAT/LC08/C02/T1_L2')
+  .filterBounds(southwestUS)
+  .filterDate(yearStartDate, yearEndDate)
+  .filter(ee.Filter.lt('CLOUD_COVER', 5))
+  .map(maskL8sr)
+  .map(ndvi);
+
+// Calculate the mean NDVI for the year 2021
+var meanNDVI = landsatCollection.select('NDVI').mean().clip(southwestUS).rename('Mean_NDVI');
+
+// Load the Daymet dataset and filter by date and region for the year 2021
+var daymet = ee.ImageCollection('NASA/ORNL/DAYMET_V4').filterBounds(southwestUS);
+var annualRain = daymet.filterDate(yearStartDate, yearEndDate).select('prcp');
+
+// Calculate the mean rainfall for the year 2021
+var meanRain = annualRain.mean().clip(southwestUS).rename('Mean_Rain');
+
+// Sample points for correlation analysis
+var samplePoints = meanNDVI.addBands(meanRain).sample({
+  region: southwestUS,
+  scale: 1000,
+  numPixels: 10000
+});
+
+// Calculate the correlation between mean NDVI and mean rainfall
+var correlation = samplePoints.reduceColumns(ee.Reducer.pearsonsCorrelation(), ['Mean_NDVI', 'Mean_Rain']);
+print('Correlation between Mean NDVI and Mean Rainfall:', correlation);
+
+// Calculate pixel-wise correlation
+var joinedCollection = meanNDVI.addBands(meanRain);
+var correlationImage = joinedCollection.reduceNeighborhood({
+  reducer: ee.Reducer.pearsonsCorrelation(),
+  kernel: ee.Kernel.square({radius: 30, units: 'pixels'})
+}).select('correlation');
+
+// Classification thresholds
+var stronglyNegative = correlationImage.lte(-0.5);
+var weaklyNegative = correlationImage.gt(-0.5).and(correlationImage.lt(0));
+var weaklyPositive = correlationImage.gte(0).and(correlationImage.lt(0.5));
+var stronglyPositive = correlationImage.gte(0.5);
+
+// Create a classified image
+var classifiedCorrelation = stronglyNegative.multiply(1)
+  .add(weaklyNegative.multiply(2))
+  .add(weaklyPositive.multiply(3))
+  .add(stronglyPositive.multiply(4));
+
+// Visualization Parameters
+var ndviParams = {
+  min: -1,
+  max: 1,
+  palette: ['blue', 'white', 'green']
+};
+
+var rainParams = {
+  min: 0,
+  max: 1000,
+  palette: ['white', 'blue', 'green']
+};
+
+var correlationParams = {
+  min: -1,
+  max: 1,
+  palette: ['red', 'white', 'blue']
+};
+
+var classifiedParams = {
+  min: 1,
+  max: 4,
+  palette: ['red', 'orange', 'yellow', 'green'],
+  labels: ['Strongly Negative', 'Weakly Negative', 'Weakly Positive', 'Strongly Positive']
+};
+
+// Function to create a color bar
+var createColorBar = function(palette, min, max, title, labels) {
+  var colorBar = ui.Panel({
+    widgets: [
+      ui.Label(min.toFixed(2)),
+      ui.Thumbnail({
+        image: ee.Image.pixelLonLat().select(0).multiply(0).add(ee.Image.pixelLonLat().select(0)),
+        params: {
+          bbox: [0, 0, 1, 0.1],
+          dimensions: '100x10',
+          format: 'png',
+          min: 0,
+          max: 1,
+          palette: palette,
+        },
+        style: {stretch: 'horizontal', margin: '0 8px'},
+      }),
+      ui.Label(max.toFixed(2))
+    ],
+    layout: ui.Panel.Layout.flow('horizontal')
+  });
+  
+  var legendTitle = ui.Label({
+    value: title,
+    style: {fontWeight: 'bold', fontSize: '12px', margin: '4px 8px'}
+  });
+
+  var legendPanel = ui.Panel({
+    widgets: [legendTitle, colorBar],
+    style: {position: 'bottom-right', padding: '8px 15px'}
+  });
+  
+  return legendPanel;
+};
+
+// Add the mean NDVI layer and its color bar to the map
+Map.centerObject(southwestUS, 6);
+Map.addLayer(meanNDVI, ndviParams, 'Mean NDVI 2021');
+var meanNDVIColorBar = createColorBar(ndviParams.palette, -1, 1, 'Mean NDVI 2021');
+Map.add(meanNDVIColorBar);
+
+// Add the mean rainfall layer and its color bar to the map
+Map.addLayer(meanRain, rainParams, 'Mean Rainfall 2021');
+var meanRainColorBar = createColorBar(rainParams.palette, 0, 1000, 'Mean Rainfall 2021');
+Map.add(meanRainColorBar);
+
+// Add the correlation layer and its color bar to the map
+Map.addLayer(correlationImage, correlationParams, 'Correlation NDVI-Rainfall');
+var correlationColorBar = createColorBar(correlationParams.palette, -1, 1, 'Correlation NDVI-Rainfall');
+Map.add(correlationColorBar);
+
+// Add the classified correlation layer and its color bar to the map
+Map.addLayer(classifiedCorrelation, classifiedParams, 'Classified Correlation NDVI-Rainfall');
+var classifiedColorBar = createColorBar(classifiedParams.palette, 1, 4, 'Classified Correlation NDVI-Rainfall');
+Map.add(classifiedColorBar);
+
+// Print results to console
+print('Mean NDVI 2021:', meanNDVI);
+print('Mean Rainfall 2021:', meanRain);
+print('Correlation Image:', correlationImage);
+print('Classified Correlation:', classifiedCorrelation);
