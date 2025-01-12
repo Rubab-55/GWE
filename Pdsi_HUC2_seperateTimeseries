@@ -1,0 +1,191 @@
+// Load the GRIDMET Drought: CONUS Drought Indices dataset
+var droughtData = ee.ImageCollection('GRIDMET/DROUGHT');
+
+// Define a geometry for the mainland United States
+var mainlandUS = ee.Geometry.Rectangle([-125, 24, -66.5, 49.5]);
+
+// Load HUC-2 boundaries
+var huc2 = ee.FeatureCollection("USGS/WBD/2017/HUC02");
+
+// Simplify the HUC-2 boundaries to reduce complexity
+var simplifiedHUC2 = huc2.filterBounds(mainlandUS).map(function(feature) {
+  return feature.simplify(1000);  // Adjust tolerance as needed
+});
+
+// Select specific HUC-2 regions across the mainland US
+var westernHUC2 = simplifiedHUC2.filter(ee.Filter.eq('huc2', '18')); // California
+var easternHUC2 = simplifiedHUC2.filter(ee.Filter.eq('huc2', '02')); // Upper Mississippi
+var midwesternHUC2 = simplifiedHUC2.filter(ee.Filter.eq('huc2', '10')); // Missouri River Basin
+var southeasternHUC2 = simplifiedHUC2.filter(ee.Filter.eq('huc2', '06')); // Tennessee
+var northeasternHUC2 = simplifiedHUC2.filter(ee.Filter.eq('huc2', '01')); // New England
+var texasGulfHUC2 = simplifiedHUC2.filter(ee.Filter.eq('huc2', '12')); // Texas-Gulf
+var ohioHUC2 = simplifiedHUC2.filter(ee.Filter.eq('huc2', '05')); // Ohio
+var greatBasinHUC2 = simplifiedHUC2.filter(ee.Filter.eq('huc2', '16')); // Great Basin
+var arkansasWhiteRedHUC2 = simplifiedHUC2.filter(ee.Filter.eq('huc2', '11')); // Arkansas-White-Red
+var greatLakesHUC2 = simplifiedHUC2.filter(ee.Filter.eq('huc2', '04')); // Great Lakes
+var pacificNorthwestHUC2 = simplifiedHUC2.filter(ee.Filter.eq('huc2', '17')); // Pacific Northwest
+var lowerMississippiHUC2 = simplifiedHUC2.filter(ee.Filter.eq('huc2', '08')); // Lower Mississippi
+var sourisRedRainyHUC2 = simplifiedHUC2.filter(ee.Filter.eq('huc2', '09')); // Souris-Red-Rainy
+var upperColoradoHUC2 = simplifiedHUC2.filter(ee.Filter.eq('huc2', '14')); // Upper Colorado
+var lowerColoradoHUC2 = simplifiedHUC2.filter(ee.Filter.eq('huc2', '15')); // Lower Colorado
+var carolinasHUC2 = simplifiedHUC2.filter(ee.Filter.eq('huc2', '03')); // Carolinas
+
+// Define years for the time series
+var years = [2015, 2016, 2017, 2018, 2019, 2020, 2021, 2022, 2023];
+
+// Function to calculate the annual average PDSI for a selected HUC-2 region
+function calculatePDSIForHUC2(region, year) {
+  var startDate = ee.Date.fromYMD(year, 1, 1);
+  var endDate = ee.Date.fromYMD(year, 12, 31);
+  var annualDroughtData = droughtData.filterDate(startDate, endDate).filterBounds(region);
+  var annualPDSI = annualDroughtData.select('pdsi').mean().clip(region.geometry());
+  return annualPDSI.set('year', year);
+}
+
+// Function to calculate time series for each region
+function calculateTimeSeries(region) {
+  return years.map(function(year) {
+    var pdsiValue = calculatePDSIForHUC2(region, year).reduceRegion({
+      reducer: ee.Reducer.mean(),
+      geometry: region.geometry(),
+      scale: 10000,
+      maxPixels: 1e12
+    }).get('pdsi');
+    return ee.Feature(null, {year: year, pdsi: pdsiValue});
+  });
+}
+
+// Calculate time series for each region
+var westernPDSITimeSeries = calculateTimeSeries(westernHUC2);
+var easternPDSITimeSeries = calculateTimeSeries(easternHUC2);
+var midwesternPDSITimeSeries = calculateTimeSeries(midwesternHUC2);
+var southeasternPDSITimeSeries = calculateTimeSeries(southeasternHUC2);
+var northeasternPDSITimeSeries = calculateTimeSeries(northeasternHUC2);
+var texasGulfPDSITimeSeries = calculateTimeSeries(texasGulfHUC2);
+var ohioPDSITimeSeries = calculateTimeSeries(ohioHUC2);
+var greatBasinPDSITimeSeries = calculateTimeSeries(greatBasinHUC2);
+var arkansasWhiteRedPDSITimeSeries = calculateTimeSeries(arkansasWhiteRedHUC2);
+var greatLakesPDSITimeSeries = calculateTimeSeries(greatLakesHUC2);
+var pacificNorthwestPDSITimeSeries = calculateTimeSeries(pacificNorthwestHUC2);
+var lowerMississippiPDSITimeSeries = calculateTimeSeries(lowerMississippiHUC2);
+var sourisRedRainyPDSITimeSeries = calculateTimeSeries(sourisRedRainyHUC2);
+var upperColoradoPDSITimeSeries = calculateTimeSeries(upperColoradoHUC2);
+var lowerColoradoPDSITimeSeries = calculateTimeSeries(lowerColoradoHUC2);
+var carolinasPDSITimeSeries = calculateTimeSeries(carolinasHUC2);
+
+// Convert the time series into FeatureCollections for charting and exporting
+var westernPDSITimeSeriesCollection = ee.FeatureCollection(westernPDSITimeSeries);
+var easternPDSITimeSeriesCollection = ee.FeatureCollection(easternPDSITimeSeries);
+var midwesternPDSITimeSeriesCollection = ee.FeatureCollection(midwesternPDSITimeSeries);
+var southeasternPDSITimeSeriesCollection = ee.FeatureCollection(southeasternPDSITimeSeries);
+var northeasternPDSITimeSeriesCollection = ee.FeatureCollection(northeasternPDSITimeSeries);
+var texasGulfPDSITimeSeriesCollection = ee.FeatureCollection(texasGulfPDSITimeSeries);
+var ohioPDSITimeSeriesCollection = ee.FeatureCollection(ohioPDSITimeSeries);
+var greatBasinPDSITimeSeriesCollection = ee.FeatureCollection(greatBasinPDSITimeSeries);
+var arkansasWhiteRedPDSITimeSeriesCollection = ee.FeatureCollection(arkansasWhiteRedPDSITimeSeries);
+var greatLakesPDSITimeSeriesCollection = ee.FeatureCollection(greatLakesPDSITimeSeries);
+var pacificNorthwestPDSITimeSeriesCollection = ee.FeatureCollection(pacificNorthwestPDSITimeSeries);
+var lowerMississippiPDSITimeSeriesCollection = ee.FeatureCollection(lowerMississippiPDSITimeSeries);
+var sourisRedRainyPDSITimeSeriesCollection = ee.FeatureCollection(sourisRedRainyPDSITimeSeries);
+var upperColoradoPDSITimeSeriesCollection = ee.FeatureCollection(upperColoradoPDSITimeSeries);
+var lowerColoradoPDSITimeSeriesCollection = ee.FeatureCollection(lowerColoradoPDSITimeSeries);
+var carolinasPDSITimeSeriesCollection = ee.FeatureCollection(carolinasPDSITimeSeries);
+
+// Export the time series as CSV files to Google Drive
+Export.table.toDrive({
+  collection: westernPDSITimeSeriesCollection,
+  description: 'Western_HUC2_PDSI_TimeSeries',
+  fileFormat: 'CSV'
+});
+
+Export.table.toDrive({
+  collection: easternPDSITimeSeriesCollection,
+  description: 'Eastern_HUC2_PDSI_TimeSeries',
+  fileFormat: 'CSV'
+});
+
+Export.table.toDrive({
+  collection: midwesternPDSITimeSeriesCollection,
+  description: 'Midwestern_HUC2_PDSI_TimeSeries',
+  fileFormat: 'CSV'
+});
+
+Export.table.toDrive({
+  collection: southeasternPDSITimeSeriesCollection,
+  description: 'Southeastern_HUC2_PDSI_TimeSeries',
+  fileFormat: 'CSV'
+});
+
+Export.table.toDrive({
+  collection: northeasternPDSITimeSeriesCollection,
+  description: 'Northeastern_HUC2_PDSI_TimeSeries',
+  fileFormat: 'CSV'
+});
+
+Export.table.toDrive({
+  collection: texasGulfPDSITimeSeriesCollection,
+  description: 'TexasGulf_HUC2_PDSI_TimeSeries',
+  fileFormat: 'CSV'
+});
+
+Export.table.toDrive({
+  collection: ohioPDSITimeSeriesCollection,
+  description: 'Ohio_HUC2_PDSI_TimeSeries',
+  fileFormat: 'CSV'
+});
+
+Export.table.toDrive({
+  collection: greatBasinPDSITimeSeriesCollection,
+  description: 'GreatBasin_HUC2_PDSI_TimeSeries',
+  fileFormat: 'CSV'
+});
+
+Export.table.toDrive({
+  collection: arkansasWhiteRedPDSITimeSeriesCollection,
+  description: 'ArkansasWhiteRed_HUC2_PDSI_TimeSeries',
+  fileFormat: 'CSV'
+});
+
+Export.table.toDrive({
+  collection: greatLakesPDSITimeSeriesCollection,
+  description: 'GreatLakes_HUC2_PDSI_TimeSeries',
+  fileFormat: 'CSV'
+});
+
+Export.table.toDrive({
+  collection: pacificNorthwestPDSITimeSeriesCollection,
+  description: 'PacificNorthwest_HUC2_PDSI_TimeSeries',
+  fileFormat: 'CSV'
+});
+
+Export.table.toDrive({
+  collection: lowerMississippiPDSITimeSeriesCollection,
+  description: 'LowerMississippi_HUC2_PDSI_TimeSeries',
+  fileFormat: 'CSV'
+});
+
+Export.table.toDrive({
+  collection: sourisRedRainyPDSITimeSeriesCollection,
+  description: 'SourisRedRainy_HUC2_PDSI_TimeSeries',
+  fileFormat: 'CSV'
+});
+
+Export.table.toDrive({
+  collection: upperColoradoPDSITimeSeriesCollection,
+  description: 'UpperColorado_HUC2_PDSI_TimeSeries',
+  fileFormat: 'CSV'
+});
+
+Export.table.toDrive({
+  collection: lowerColoradoPDSITimeSeriesCollection,
+  description: 'LowerColorado_HUC2_PDSI_TimeSeries',
+  fileFormat: 'CSV'
+});
+
+Export.table.toDrive({
+  collection: carolinasPDSITimeSeriesCollection,
+  description: 'Carolinas_HUC2_PDSI_TimeSeries',
+  fileFormat: 'CSV'
+});
+
+// Optionally, you can print the charts or add them to the map as before
