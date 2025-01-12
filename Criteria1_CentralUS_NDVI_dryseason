@@ -1,0 +1,206 @@
+// Define the geometries for the Central US and Texas
+var centralUS = ee.Geometry.Rectangle([-103, 36, -89, 49]);
+var texas = ee.Geometry.Rectangle([-106, 25, -93, 37]);
+
+// Define the date range for the dry season in Central US and Texas (June to August)
+var dryStartDate = '2021-06-01';
+var dryEndDate = '2021-08-31';
+
+// Load the SRTM Digital Elevation Data
+var srtm = ee.Image('USGS/SRTMGL1_003');
+
+// Define a land mask: elevation > 0
+var landMask = srtm.gt(0);
+
+// Cloud masking and scaling function
+function maskL8sr(image) {
+  var qaMask = image.select('QA_PIXEL').bitwiseAnd(parseInt('11111', 2)).eq(0);
+  var saturationMask = image.select('QA_RADSAT').eq(0);
+
+  var opticalBands = image.select('SR_B.').multiply(0.0000275).add(-0.2);
+  var thermalBands = image.select('ST_B.*').multiply(0.00341802).add(149.0);
+
+  return image.updateMask(qaMask).updateMask(saturationMask)
+      .addBands(opticalBands, null, true)
+      .addBands(thermalBands, null, true);
+}
+
+// Function to compute NDVI
+function computeNDVI(image) {
+  var ndvi = image.normalizedDifference(['SR_B5', 'SR_B4']).rename('NDVI');
+  return ndvi;
+}
+
+// Load Landsat 8 Collection 2 Level 2 data for the dry season and filter by date and cloud cover
+var landsatCollection = ee.ImageCollection('LANDSAT/LC08/C02/T1_L2')
+  .filterDate(dryStartDate, dryEndDate)
+  .filter(ee.Filter.lt('CLOUD_COVER', 5))
+  .map(maskL8sr)
+  .map(computeNDVI);
+
+// Compute the median NDVI for the dry season
+var medianNDVI = landsatCollection.median().select('NDVI');
+
+// Load HUC-6 boundaries
+var huc6 = ee.FeatureCollection("USGS/WBD/2017/HUC06");
+
+// Filter HUC-6 boundaries by the Central US and Texas regions
+var huc6CentralUS = huc6.filterBounds(centralUS);
+var huc6Texas = huc6.filterBounds(texas);
+
+// Simplify the HUC-6 boundaries to reduce complexity
+var simplifiedHUC6CentralUS = huc6CentralUS.map(function(feature) {
+  return feature.simplify(1000);  // Adjust tolerance as needed
+});
+var simplifiedHUC6Texas = huc6Texas.map(function(feature) {
+  return feature.simplify(1000);  // Adjust tolerance as needed
+});
+
+// Clip the NDVI image to the simplified HUC-6 boundaries
+var clippedNDVICentralUS = medianNDVI.clipToCollection(simplifiedHUC6CentralUS);
+var clippedNDVITexas = medianNDVI.clipToCollection(simplifiedHUC6Texas);
+
+// Define the region for sampling
+var samplingRegionCentralUS = simplifiedHUC6CentralUS.geometry();
+var samplingRegionTexas = simplifiedHUC6Texas.geometry();
+
+// Run k-means clustering with fewer sample points for Central US
+var trainingCentralUS = clippedNDVICentralUS.sample({
+  region: samplingRegionCentralUS,
+  scale: 30,
+  numPixels: 500,  // Reduced number of sample points
+  geometries: true
+});
+
+var clustererCentralUS = ee.Clusterer.wekaKMeans(5).train(trainingCentralUS);
+
+var clusteredCentralUS = clippedNDVICentralUS.cluster(clustererCentralUS);
+
+// Run k-means clustering with fewer sample points for Texas
+var trainingTexas = clippedNDVITexas.sample({
+  region: samplingRegionTexas,
+  scale: 30,
+  numPixels: 500,  // Reduced number of sample points
+  geometries: true
+});
+
+var clustererTexas = ee.Clusterer.wekaKMeans(5).train(trainingTexas);
+
+var clusteredTexas = clippedNDVITexas.cluster(clustererTexas);
+
+// Calculate mean NDVI for each cluster in Central US
+var clusterMeansCentralUS = ee.List.sequence(0, 4).map(function(clusterIndex) {
+  var meanNDVI = clippedNDVICentralUS.updateMask(clusteredCentralUS.eq(ee.Image.constant(clusterIndex))).reduceRegion({
+    reducer: ee.Reducer.mean(),
+    geometry: samplingRegionCentralUS,
+    scale: 30,
+    bestEffort: true
+  }).get('NDVI');
+  return ee.Feature(null, {clusterIndex: clusterIndex, meanNDVI: meanNDVI});
+});
+
+// Calculate mean NDVI for each cluster in Texas
+var clusterMeansTexas = ee.List.sequence(0, 4).map(function(clusterIndex) {
+  var meanNDVI = clippedNDVITexas.updateMask(clusteredTexas.eq(ee.Image.constant(clusterIndex))).reduceRegion({
+    reducer: ee.Reducer.mean(),
+    geometry: samplingRegionTexas,
+    scale: 30,
+    bestEffort: true
+  }).get('NDVI');
+  return ee.Feature(null, {clusterIndex: clusterIndex, meanNDVI: meanNDVI});
+});
+
+// Convert the lists of features to feature collections
+var clusterMeanFeaturesCentralUS = ee.FeatureCollection(clusterMeansCentralUS);
+var clusterMeanFeaturesTexas = ee.FeatureCollection(clusterMeansTexas);
+
+// Sort the feature collections by mean NDVI
+var sortedClusterMeansCentralUS = clusterMeanFeaturesCentralUS.sort('meanNDVI');
+var sortedClusterMeansTexas = clusterMeanFeaturesTexas.sort('meanNDVI');
+
+// Extract sorted cluster indices
+var sortedClusterIndicesCentralUS = sortedClusterMeansCentralUS.aggregate_array('clusterIndex');
+var sortedClusterIndicesTexas = sortedClusterMeansTexas.aggregate_array('clusterIndex');
+
+// Define cluster ranks
+var clusterRanks = ee.List.sequence(1, 5);
+
+// Create images where each pixel is assigned the value of its respective group's rank
+var rankedClustersCentralUS = clusteredCentralUS.remap(sortedClusterIndicesCentralUS, clusterRanks);
+var rankedClustersTexas = clusteredTexas.remap(sortedClusterIndicesTexas, clusterRanks);
+
+// Define cluster visualization parameters
+var clusterVisParams = {
+  min: 1,
+  max: 5,
+  palette: ['red', 'orange', 'yellow', 'green', 'darkgreen']
+};
+
+// Define NDVI visualization parameters using jet color palette
+var ndviParams = {
+  min: -1,
+  max: 1,
+  palette: ['#000080', '#0000FF', '#00FFFF', '#00FF00', '#FFFF00', '#FF0000', '#800000']
+};
+
+// Define visualization parameters for HUC-6 boundaries
+var huc6VisParams = {
+  color: 'black',
+  width: 1,
+  fillColor: '00000000'
+};
+
+// Add HUC-6 boundaries to the map
+Map.addLayer(simplifiedHUC6CentralUS.style(huc6VisParams), {}, 'HUC-6 Boundaries Central US');
+Map.addLayer(simplifiedHUC6Texas.style(huc6VisParams), {}, 'HUC-6 Boundaries Texas');
+
+// Add NDVI layer for each pixel to the map
+Map.addLayer(clippedNDVICentralUS.visualize(ndviParams), {}, 'NDVI Central US');
+Map.addLayer(clippedNDVITexas.visualize(ndviParams), {}, 'NDVI Texas');
+
+// Add ranked clustered NDVI layers to the map
+Map.addLayer(rankedClustersCentralUS.visualize(clusterVisParams), {}, 'Ranked Clustered NDVI Central US');
+Map.addLayer(rankedClustersTexas.visualize(clusterVisParams), {}, 'Ranked Clustered NDVI Texas');
+
+// Center the map on the Central US and Texas region to ensure proper display
+Map.centerObject(centralUS.union(texas), 5);
+
+// Create a legend for the ranked clustered NDVI
+var legend = ui.Panel({style: {position: 'bottom-right', padding: '8px 15px'}});
+var legendTitle = ui.Label({value: 'Ranked NDVI Clusters', style: {fontWeight: 'bold', fontSize: '12px'}});
+
+var makeRow = function(color, name) {
+  var colorBox = ui.Label({
+    style: {
+      backgroundColor: color,
+      padding: '8px',
+      margin: '0 0 4px 0'
+    }
+  });
+
+  var description = ui.Label({
+    value: name,
+    style: {margin: '0 0 4px 6px'}
+  });
+
+  return ui.Panel({
+    widgets: [colorBox, description],
+    layout: ui.Panel.Layout.Flow('horizontal')
+  });
+};
+
+var clusterColors = ['red', 'orange', 'yellow', 'green', 'darkgreen'];
+var clusterNames = ['Very Low Vegetation (Rank 1)', 'Low Vegetation (Rank 2)', 'Moderate Vegetation (Rank 3)', 'High Vegetation (Rank 4)', 'Very High Vegetation (Rank 5)'];
+
+legend.add(legendTitle);
+for (var i = 0; i < clusterColors.length; i++) {
+  legend.add(makeRow(clusterColors[i], clusterNames[i]));
+}
+
+Map.add(legend);
+
+// Print the clustered images to the console for verification
+print('Clustered NDVI Central US:', clusteredCentralUS);
+print('Ranked Clustered NDVI Central US:', rankedClustersCentralUS);
+print('Clustered NDVI Texas:', clusteredTexas);
+print('Ranked Clustered NDVI Texas:', rankedClustersTexas);
