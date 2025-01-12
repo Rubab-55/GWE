@@ -1,0 +1,72 @@
+// Load the United States shapefile
+var states = ee.FeatureCollection("TIGER/2018/States");
+
+// List of non-mainland states to exclude
+var nonMainlandStates = ['Alaska', 'Hawaii', 'American Samoa', 'Commonwealth of the Northern Mariana Islands', 
+                         'Guam', 'Puerto Rico', 'United States Virgin Islands'];
+
+// Filter out the non-mainland states
+var mainlandStates = states.filter(ee.Filter.inList('NAME', nonMainlandStates).not());
+
+// Merge all mainland states into a single feature to represent the mainland US
+var mainlandUS = mainlandStates.union().geometry();
+
+// Add the mainland US boundary to the map
+Map.addLayer(mainlandUS, {color: 'red'}, 'Mainland US Boundary');
+
+// Center the map on the mainland US
+Map.centerObject(mainlandUS, 4);
+
+// Print the mainland US boundary geometry to the console
+print('Mainland US Boundary:', mainlandUS);
+
+// Define the date range for the Landsat 8 data (summer 2018)
+var startDate = '2018-06-21';
+var endDate = '2018-09-22';
+
+// Load the updated Landsat 8 Collection 2 Level 2 dataset and filter by date and cloud cover
+var landsatCollection = ee.ImageCollection("LANDSAT/LC08/C02/T1_L2")
+  .filterBounds(mainlandUS)
+  .filterDate(startDate, endDate)
+  .filter(ee.Filter.lt('CLOUD_COVER', 5))
+  .select(['SR_B5', 'SR_B4']);
+
+// Apply the scaling factors to the surface reflectance bands
+var landsatCollection = landsatCollection.map(function(image) {
+  var nir = image.select('SR_B5').multiply(0.0000275).add(-0.2);
+  var red = image.select('SR_B4').multiply(0.0000275).add(-0.2);
+  var ndvi = nir.subtract(red).divide(nir.add(red)).rename('NDVI');
+  return ndvi.copyProperties(image, image.propertyNames());
+}).mean().clip(mainlandUS);
+
+// Define NDVI visualization parameters
+var ndviParams = {min: -1, max: 1, palette: ['blue', 'white', 'green']};
+
+// Add the NDVI layer to the map
+Map.addLayer(landsatCollection, ndviParams, 'NDVI Summer 2018');
+
+// Print the NDVI image to the console
+print('NDVI Image:', landsatCollection);
+
+// Load the NLCD 2016 dataset
+var nlcd = ee.Image('USGS/NLCD_RELEASES/2016_REL/2016')
+  .select('landcover')
+  .clip(mainlandUS);
+
+// Define visualization parameters for the NLCD data
+var nlcdParams = {
+  min: 0,
+  max: 95,
+  palette: [
+    '466b9f', 'd1def8', 'dec5c5', 'd99282', 'eb0000', 'ab0000', 'b3ac9f', '68ab5f', '1c5f2c', 'b5ca8f',
+    'a3cc51', '82ba9e', 'dcd93d', 'ab7028', 'bad9eb', '70a3ba', 'e9e9e9', 'dedede'
+  ]
+};
+
+// Add the NLCD layer to the map
+Map.addLayer(nlcd, nlcdParams, 'NLCD 2016');
+
+// Print the NLCD image to the console
+print('NLCD Image:', nlcd);
+
+
