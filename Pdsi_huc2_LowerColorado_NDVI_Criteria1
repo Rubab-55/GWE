@@ -1,0 +1,245 @@
+// Simplified Geometry of CONUS
+var lsib = ee.FeatureCollection("USDOS/LSIB_SIMPLE/2017");
+var mainlandUS = lsib.filter(ee.Filter.eq('country_na', 'United States'));
+
+// Define the date range for the Landsat 8 data (summer 2018)
+var startDate = '2018-06-21';
+var endDate = '2018-09-22';
+
+// Function to compute NDVI
+function computeNDVI(image) {
+  var ndvi_image = image.normalizedDifference(['SR_B5', 'SR_B4']).rename('NDVI');
+  return ndvi_image.copyProperties(image, image.propertyNames());
+}
+
+// Load Landsat 8 Collection 2 Tier 1 surface reflectance data and calculate NDVI
+var landsatCollection = ee.ImageCollection('LANDSAT/LC08/C02/T1_L2')
+  .filterBounds(mainlandUS)
+  .filterDate(startDate, endDate)
+  .filter(ee.Filter.lt('CLOUD_COVER', 10))
+  .map(computeNDVI);
+
+// Get first image
+print(landsatCollection.first());
+
+// Define NDVI visualization parameters
+var ndviParams = {min: -1, max: 1, palette: ['blue', 'white', 'green']};
+
+// Add the NDVI layer to the map
+Map.addLayer(landsatCollection.median().clip(mainlandUS), ndviParams, 'NDVI Summer 2018');
+
+// Modify the original script to use this data source and NDVI calculation
+
+// Define the HUC-2 region for Lower Colorado
+var lowerColoradoHUC2 = ee.FeatureCollection("USGS/WBD/2017/HUC02")
+  .filter(ee.Filter.eq('huc2', '15'))
+  .map(function(feature) {
+    return feature.simplify(1000);  // Simplify the geometry to reduce complexity
+  });
+
+// Load the SRTM 30m Digital Elevation Data
+var srtm = ee.Image('USGS/SRTMGL1_003');
+
+// Clip the DEM to the Lower Colorado HUC-2 boundaries
+var clippedDEM = srtm.clipToCollection(lowerColoradoHUC2);
+
+// Define a more representative visualization parameters for the DEM
+var demVisParams = {
+  min: 0,
+  max: 4000,
+  palette: ['000000', '0000FF', '00FFFF', '00FF00', 'FFFF00', 'FF8000', 'FF0000', 'FFFFFF']
+};
+
+// Add the DEM layer to the map with the improved color scheme
+Map.addLayer(clippedDEM, demVisParams, '30m DEM Lower Colorado HUC-2');
+
+// Center the map on the Lower Colorado HUC-2 region
+Map.centerObject(lowerColoradoHUC2, 7);
+
+// Add the HUC-2 boundaries to the map as a FeatureCollection
+Map.addLayer(lowerColoradoHUC2.style({color: '000000', width: 2, fillColor: '00000000'}), {}, 'Lower Colorado HUC-2 Boundary');
+
+// Load the NLCD Land Cover data for 2019
+var nlcdLandCover = ee.Image('USGS/NLCD_RELEASES/2019_REL/NLCD/2019')
+  .select('landcover')
+  .clipToCollection(lowerColoradoHUC2);
+
+// Create a mask to exclude developed areas (values 21, 22, 23, 24)
+var mask = nlcdLandCover.neq(21)
+  .and(nlcdLandCover.neq(22))
+  .and(nlcdLandCover.neq(23))
+  .and(nlcdLandCover.neq(24));
+
+// Apply the mask to the land cover data
+var maskedLandCover = nlcdLandCover.updateMask(mask);
+
+// Define visualization parameters for NLCD Land Cover
+var landCoverVisParams = {
+  min: 11,
+  max: 95,
+  palette: [
+    '476ba1', 'd1def8', 'dec5c5', 'd99282', 'eb0000',
+    'ab0000', 'b3ac9f', '68ab5f', '1c5f2c', 'b5ca8f',
+    'a68c30', 'ccba7d', 'e2e2c2', 'c9d29b', '99c247',
+    '78ae94', 'dcd93d', 'bdf7b7', '6d6d6d', 'ffffff'
+  ]
+};
+
+// Add the masked NLCD Land Cover layer to the map
+Map.addLayer(maskedLandCover, landCoverVisParams, 'NLCD Land Cover (Masked)');
+
+// Extract the wetlands classes from the NLCD dataset
+var wetlands = nlcdLandCover.updateMask(nlcdLandCover.eq(90).or(nlcdLandCover.eq(95)));
+
+// Define visualization parameters for wetlands with a darker green color
+var wetlandsVisParams = {
+  palette: ['004d00'],  // Darker green color for wetlands
+  opacity: 0.7
+};
+
+// Add the wetlands layer to the map
+Map.addLayer(wetlands, wetlandsVisParams, 'Wetlands Overlay');
+
+// Compute the median NDVI for the dry season
+var medianNDVI = landsatCollection.median().select('NDVI');
+
+// Clip the NDVI image to the simplified HUC-2 boundaries
+var clippedNDVILowerColorado = medianNDVI.clipToCollection(lowerColoradoHUC2);
+
+// Sample points for clustering (reduced number of points)
+var training = clippedNDVILowerColorado.sample({
+  region: lowerColoradoHUC2.geometry(),
+  scale: 30,  // Increased scale to reduce processing time
+  numPixels: 1000,  // Reduced number of sample points
+  geometries: true
+});
+
+// Apply k-means clustering with 5 clusters (from low to high NDVI)
+var clusterer = ee.Clusterer.wekaKMeans(5).train(training);
+var clustered = clippedNDVILowerColorado.cluster(clusterer);
+
+// Define visualization parameters for clustering
+var clusterVisParams = {
+  min: 0,
+  max: 4,
+  palette: ['FF0000', 'FFA500', 'FFFF00', '00FF00', '008000']  // From low to high NDVI
+};
+
+// Add the clustered NDVI layer to the map
+Map.addLayer(clustered.visualize(clusterVisParams), {}, 'Clustered NDVI Lower Colorado HUC-2');
+
+// Add the NDVI layer for the Lower Colorado HUC-2 region to the map
+Map.addLayer(clippedNDVILowerColorado.visualize(ndviParams), {}, 'NDVI Lower Colorado HUC-2');
+
+// Create a histogram of NDVI values
+var ndviHistogram = ui.Chart.image.histogram({
+  image: clippedNDVILowerColorado,
+  region: lowerColoradoHUC2.geometry(),
+  scale: 500,  // Adjust the scale to control pixel count
+  maxPixels: 1e8  // Increased maxPixels limit
+})
+.setOptions({
+  title: 'Histogram of NDVI values',
+  hAxis: {title: 'NDVI', minValue: -1, maxValue: 1},
+  vAxis: {title: 'Frequency'},
+  series: {
+    0: {color: 'teal'}
+  }
+});
+
+// Print the NDVI histogram to the console
+print(ndviHistogram);
+
+// Create a histogram of clustering results
+var clusterHistogram = ui.Chart.image.histogram({
+  image: clustered,
+  region: lowerColoradoHUC2.geometry(),
+  scale: 500,  // Adjust the scale to control pixel count
+  maxPixels: 1e8  // Increased maxPixels limit
+})
+.setOptions({
+  title: 'Histogram of Clustering Results',
+  hAxis: {title: 'Cluster', minValue: 0, maxValue: 4},
+  vAxis: {title: 'Frequency'},
+  series: {
+    0: {color: 'blue'}
+  }
+});
+
+// Print the clustering histogram to the console
+print(clusterHistogram);
+
+// Print the clustered image to the console for verification
+print('Clustered NDVI Lower Colorado HUC-2:', clustered);
+
+// Create Clustering legend
+var clusterColors = ['#FF0000', '#FFA500', '#FFFF00', '#00FF00', '#008000'];
+var clusterLabels = ['Very Low NDVI', 'Low NDVI', 'Moderate NDVI', 'High NDVI', 'Very High NDVI'];
+
+var clusterLegend = ui.Panel({
+  style: {position: 'bottom-right', padding: '8px 15px'}
+});
+
+clusterLegend.add(ui.Label('NDVI Clusters', {fontWeight: 'bold'}));
+
+for (var i = 0; i < clusterColors.length; i++) {
+  var colorBox = ui.Label({
+    style: {backgroundColor: clusterColors[i], padding: '8px', margin: '0 0 4px 0'}
+  });
+  var description = ui.Label({
+    value: clusterLabels[i],
+    style: {margin: '0 0 4px 6px'}
+  });
+  clusterLegend.add(ui.Panel({
+    widgets: [colorBox, description],
+    layout: ui.Panel.Layout.flow('horizontal')
+  }));
+}
+
+// Add the clustering legend to the map
+Map.add(clusterLegend);
+
+// Create NLCD Land Cover legend
+var landCoverLegend = ui.Panel({
+  style: {position: 'bottom-left', padding: '8px 15px'}
+});
+
+landCoverLegend.add(ui.Label('NLCD Land Cover (Masked)', {fontWeight: 'bold'}));
+
+// Define land cover classes (from NLCD)
+var landCoverClasses = {
+  11: 'Open Water',
+  12: 'Perennial Ice/Snow',
+  31: 'Barren Land (Rock/Sand/Clay)',
+  41: 'Deciduous Forest',
+  42: 'Evergreen Forest',
+  43: 'Mixed Forest',
+  52: 'Shrub/Scrub',
+  71: 'Herbaceous',
+  81: 'Hay/Pasture',
+  82: 'Cultivated Crops',
+  90: 'Woody Wetlands',
+  95: 'Emergent Herbaceous Wetlands'
+};
+
+// Add land cover class legend entries
+Object.keys(landCoverClasses).forEach(function(key) {
+  var colorBox = ui.Label({
+    style: {
+      backgroundColor: landCoverVisParams.palette[Object.keys(landCoverClasses).indexOf(key)],
+      padding: '8px',
+      margin: '0 0 4px 0'
+    }
+  });
+  var description = ui.Label({
+    value: landCoverClasses[key],
+    style: {margin: '0 0 4px 6px'}
+  });
+  landCoverLegend.add(ui.Panel({
+    widgets: [colorBox, description],
+    layout: ui.Panel.Layout.flow('horizontal')
+  }));
+});
+
+// Add the land cover legend to the map
+Map.add(landCoverLegend);
