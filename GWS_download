@@ -1,0 +1,35 @@
+// Define mainland US boundaries
+var countries = ee.FeatureCollection('USDOS/LSIB_SIMPLE/2017');
+var mainlandUS = countries
+  .filter(ee.Filter.eq('country_na', 'United States'))
+  .filterBounds(ee.Geometry.BBox(-125, 24, -66, 50));
+
+// Load the Global Surface Water dataset
+var gsw = ee.Image('JRC/GSW1_0/GlobalSurfaceWater');
+var occurrence = gsw.select('occurrence').clip(mainlandUS);
+
+// Create a grid of 1° x 1° cells over mainland US
+var grid = ee.Image.random().multiply(1e6).toInt(); // Create a single-band random image for grid creation
+var gridFeatures = grid.reduceToVectors({
+  geometry: mainlandUS,
+  scale: 100000,  // Use a 100 km scale for vectorizing grid cells
+  geometryType: 'polygon',
+  reducer: ee.Reducer.countEvery()
+});
+
+// Export each tile in the grid with 30m spatial resolution
+gridFeatures.aggregate_array('system:index').getInfo().forEach(function(index) {
+  var feature = gridFeatures.filter(ee.Filter.eq('system:index', index)).first();
+  
+  Export.image.toDrive({
+    image: occurrence.reproject({
+      crs: 'EPSG:5070',  // Albers Equal Area for continental US
+      scale: 30  // Confirmed scale at 30 meters for export
+    }),
+    description: 'Water_Occurrence_1984_2015_Tile_' + index,
+    folder: 'EarthEngineExports',
+    fileNamePrefix: 'Water_Occurrence_Tile_' + index,
+    region: feature.geometry(),
+    maxPixels: 1e13  // Allow for large export area
+  });
+});
