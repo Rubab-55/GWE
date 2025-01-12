@@ -1,0 +1,208 @@
+// Define the HUC2 region for the Southeastern United States (HUC2 code '03')
+var southeasternHUC2 = ee.FeatureCollection("USGS/WBD/2017/HUC02")
+  .filter(ee.Filter.eq('huc2', '03'))  // Southeastern region HUC2 code
+  .geometry()  // Extract the geometry
+  .simplify(1000);  // Simplify the geometry to reduce complexity
+
+// Define the date range for July 1990 to July 2023
+var startDate = '1990-07-01';
+var endDate = '2023-07-31';
+
+// Load the NLCD dataset for masking urban areas
+var nlcd = ee.Image('USGS/NLCD_RELEASES/2019_REL/NLCD/2019');
+var urbanMask = nlcd.select('landcover').eq(21)
+  .or(nlcd.select('landcover').eq(22))
+  .or(nlcd.select('landcover').eq(23))
+  .or(nlcd.select('landcover').eq(24));
+
+// Cloud masking and scaling
+function maskL8sr(image) {
+  var qaMask = image.select('QA_PIXEL').bitwiseAnd(parseInt('11111', 2)).eq(0);
+  var saturationMask = image.select('QA_RADSAT').eq(0);
+
+  // Apply the scaling factors to the appropriate bands.
+  var opticalBands = image.select('SR_B.').multiply(0.0000275).add(-0.2);
+  var thermalBands = image.select('ST_B.*').multiply(0.00341802).add(149.0);
+
+  // Replace the original bands with the scaled ones and apply the masks.
+  return image.addBands(opticalBands, null, true)
+      .addBands(thermalBands, null, true)
+      .updateMask(qaMask)
+      .updateMask(saturationMask)
+      .updateMask(urbanMask.not()); // Exclude urban areas
+}
+
+// Function to compute NDVI
+function computeNDVI(image) {
+  var ndvi = image.normalizedDifference(['SR_B5', 'SR_B4']).rename('NDVI');
+  return image.addBands(ndvi);
+}
+
+// Function to process the Southeastern HUC2 region
+function processRegion(regionGeom, regionName) {
+  var landsatCollection = ee.ImageCollection("LANDSAT/LC08/C02/T1_L2")
+    .filterBounds(regionGeom)
+    .filterDate(startDate, endDate)
+    .filter(ee.Filter.calendarRange(7, 7, 'month'))
+    .filter(ee.Filter.lt('CLOUD_COVER', 10))  // Relaxed cloud cover filter
+    .map(maskL8sr)
+    .map(computeNDVI);
+
+  var stdDevNDVIYear = landsatCollection.select('NDVI').reduce(ee.Reducer.stdDev());
+  var stdDevNDVIYearClipped = stdDevNDVIYear.clip(regionGeom);
+
+  // Sample points for k-means clustering
+  var training = stdDevNDVIYearClipped.sample({
+    region: regionGeom,
+    scale: 30,
+    numPixels: 1000,
+    geometries: true
+  });
+
+  // Apply k-means clustering
+  var clusterer = ee.Clusterer.wekaKMeans(5).train(training);
+  var clustered = stdDevNDVIYearClipped.cluster(clusterer);
+
+  // Calculate mean NDVI std dev for each cluster
+  var clusterMeans = ee.List.sequence(0, 4).map(function(clusterIndex) {
+    var meanNDVIStdDev = stdDevNDVIYearClipped.updateMask(clustered.eq(ee.Image.constant(clusterIndex))).reduceRegion({
+      reducer: ee.Reducer.mean(),
+      geometry: regionGeom,
+      scale: 30,
+      bestEffort: true
+    }).get('NDVI_stdDev');
+    return ee.Feature(null, {clusterIndex: clusterIndex, meanNDVIStdDev: meanNDVIStdDev});
+  });
+
+  // Sort the clusters by mean NDVI std dev
+  var clusterMeanFeatures = ee.FeatureCollection(clusterMeans);
+  var sortedClusterMeans = clusterMeanFeatures.sort('meanNDVIStdDev', false); // Sort descending
+  var sortedClusterIndices = sortedClusterMeans.aggregate_array('clusterIndex');
+
+  // Assign ranks to clusters
+  var clusterRanks = ee.List.sequence(1, 5); // 1 (highest std dev) to 5 (lowest std dev)
+  var rankedClusters = clustered.remap(sortedClusterIndices, clusterRanks);
+
+  // Define visualization parameters for the ranked clusters
+  var clusterVisParams = {
+    min: 1,
+    max: 5,
+    palette: ['#ff0000', '#ff7f00', '#ffff00', '#7fff00', '#00ff00']
+  };
+
+  // Add the ranked clustered NDVI layer to the map
+  Map.addLayer(rankedClusters, clusterVisParams, 'Ranked Clusters of NDVI Std Dev 1990-2023 ' + regionName);
+
+  return rankedClusters;
+}
+
+// Process the Southeastern HUC2 region
+var processedRegion = processRegion(southeasternHUC2, 'Southeastern HUC2');
+
+// Create legends for the ranked clusters
+var createColorBar = function(palette, min, max, title) {
+  var colorBar = ui.Panel({
+    widgets: [
+      ui.Label(min),
+      ui.Thumbnail({
+        image: ee.Image.pixelLonLat().select(0).multiply(0).add(ee.Image.pixelLonLat().select(0)),
+        params: {
+          bbox: [0, 0, 1, 0.1],
+          dimensions: '100x10',
+          format: 'png',
+          min: 0,
+          max: 1,
+          palette: palette,
+        },
+        style: {stretch: 'horizontal', margin: '0 8px'},
+      }),
+      ui.Label(max.toString())
+    ],
+    layout: ui.Panel.Layout.flow('horizontal')
+  });
+  
+  var legendTitle = ui.Label({
+    value: title,
+    style: {fontWeight: 'bold', fontSize: '12px', margin: '4px 8px'}
+  });
+
+  var legendPanel = ui.Panel({
+    widgets: [legendTitle, colorBar],
+    style: {position: 'bottom-right', padding: '8px 15px'}
+  });
+  
+  return legendPanel;
+};
+
+// Create and add the legend for ranked clusters
+var rankedClustersLegendPanel = createColorBar(['#ff0000', '#ff7f00', '#ffff00', '#7fff00', '#00ff00'], 1, 5, 'Ranked Clusters of NDVI Std Dev');
+Map.add(rankedClustersLegendPanel);
+
+// Add the NLCD land cover layer
+var nlcdVisParams = {
+  min: 0,
+  max: 95,
+  palette: [
+    '466b9f', 'd1defa', 'decaca', 'd99482', 'ee0000', 'ab0000', 'b3ac9f', '68ab5f', '1c6330', 'b5ca8f',
+    '6e9d58', '476818', 'bad9eb', '70a3ba', 'dcd93d', 'ab7028', 'a3a3a3', 'bebebe', 'd8d8d8', 'f5f5f5'
+  ],
+  opacity: 0.5
+};
+Map.addLayer(nlcd.select('landcover'), nlcdVisParams, 'NLCD Land Cover');
+
+// Create NLCD legend
+var nlcdLegend = ui.Panel({
+  style: {
+    position: 'top-left',
+    padding: '8px 15px'
+  }
+});
+var nlcdLegendTitle = ui.Label({
+  value: 'NLCD Land Cover',
+  style: {fontWeight: 'bold', fontSize: '12px', margin: '4px 8px'}
+});
+nlcdLegend.add(nlcdLegendTitle);
+var nlcdPalette = [
+  {color: '466b9f', name: 'Open Water'},
+  {color: 'd1defa', name: 'Perennial Ice/Snow'},
+  {color: 'decaca', name: 'Developed, Open Space'},
+  {color: 'd99482', name: 'Developed, Low Intensity'},
+  {color: 'ee0000', name: 'Developed, Medium Intensity'},
+  {color: 'ab0000', name: 'Developed, High Intensity'},
+  {color: 'b3ac9f', name: 'Barren Land (Rock/Sand/Clay)'},
+  {color: '68ab5f', name: 'Deciduous Forest'},
+  {color: '1c6330', name: 'Evergreen Forest'},
+  {color: 'b5ca8f', name: 'Mixed Forest'},
+  {color: '6e9d58', name: 'Shrub/Scrub'},
+  {color: '476818', name: 'Herbaceous'},
+  {color: 'bad9eb', name: 'Hay/Pasture'},
+  {color: '70a3ba', name: 'Cultivated Crops'},
+  {color: 'dcd93d', name: 'Woody Wetlands'},
+  {color: 'ab7028', name: 'Emergent Herbaceous Wetlands'},
+  {color: 'a3a3a3', name: 'Unconsolidated Shore'},
+  {color: 'bebebe', name: 'Disturbed'},
+  {color: 'd8d8d8', name: 'Forest/Shrub/Scrub - Post-Fire Regeneration'},
+  {color: 'f5f5f5', name: 'Non-Vegetated - High Latitude Aquatic Bed'}
+];
+nlcdPalette.forEach(function(item) {
+  nlcdLegend.add(ui.Panel({
+    widgets: [
+      ui.Label({
+        style: {
+          backgroundColor: item.color,
+          padding: '8px',
+          margin: '0 0 4px 0'
+        }
+      }),
+      ui.Label({
+        value: item.name,
+        style: {margin: '0 0 4px 6px'}
+      })
+    ],
+    layout: ui.Panel.Layout.Flow('horizontal')
+  }));
+});
+Map.add(nlcdLegend);
+
+// Center the map on the Southeastern HUC2 region
+Map.centerObject(southeasternHUC2, 6);
