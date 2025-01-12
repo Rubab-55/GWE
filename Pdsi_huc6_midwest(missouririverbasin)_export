@@ -1,0 +1,135 @@
+// Load the GRIDMET Drought: CONUS Drought Indices dataset
+var droughtData = ee.ImageCollection('GRIDMET/DROUGHT');
+
+// Define the HUC-6 region for the Missouri River Basin
+var midwestHUC6 = ee.FeatureCollection("USGS/WBD/2017/HUC06")
+  .filter(ee.Filter.stringContains('huc6', '10'))  // HUC-6 code for Missouri River Basin
+  .map(function(feature) {
+    return feature.simplify(1000);  // Simplify the geometry to reduce complexity
+  });
+
+// Load the SRTM 30m Digital Elevation Data
+var srtm = ee.Image('USGS/SRTMGL1_003');
+
+// Clip the DEM to the Missouri River Basin HUC-6 boundaries
+var clippedDEM = srtm.clipToCollection(midwestHUC6);
+
+// Define visualization parameters for the DEM
+var demVisParams = {
+  min: 0,
+  max: 4000,
+  palette: ['000000', '0000FF', '00FFFF', '00FF00', 'FFFF00', 'FF8000', 'FF0000', 'FFFFFF']
+};
+
+// Add the DEM layer to the map with the improved color scheme
+Map.addLayer(clippedDEM, demVisParams, '30m DEM Missouri River Basin HUC-6');
+
+// Center the map on the Missouri River Basin HUC-6 region
+Map.centerObject(midwestHUC6, 7);
+
+// Add the HUC-6 boundaries to the map as a FeatureCollection
+Map.addLayer(midwestHUC6.style({color: '000000', width: 2, fillColor: '00000000'}), {}, 'Missouri River Basin HUC-6 Boundary');
+
+// Function to compute NDVI
+function computeNDVI(image) {
+  var ndvi = image.normalizedDifference(['B8', 'B4']).rename('NDVI');
+  return ndvi;
+}
+
+// Define the date range for the dry season in the region
+var dryStartDate = '2021-05-01';
+var dryEndDate = '2021-06-30';
+
+// Load Sentinel-2 surface reflectance data for the dry season
+var sentinel2Collection = ee.ImageCollection('COPERNICUS/S2_SR')
+  .filterDate(dryStartDate, dryEndDate)
+  .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 20))
+  .map(computeNDVI);
+
+// Compute the median NDVI for the dry season
+var medianNDVI = sentinel2Collection.median().select('NDVI');
+
+// Function to apply clustering to each HUC-6 unit and export the data
+function applyClustering(huc6Region) {
+  var regionGeometry = huc6Region.geometry();
+  var regionName = huc6Region.getString('name');  // Use the name property of the HUC-6 region
+  
+  // Clip the NDVI image to the current HUC-6 boundaries
+  var clippedNDVI = medianNDVI.clip(regionGeometry);
+  
+  // Sample points for clustering (reduced number of points)
+  var training = clippedNDVI.sample({
+    region: regionGeometry,
+    scale: 30,  // Increased scale to reduce processing time
+    numPixels: 1000,  // Reduced number of sample points
+    geometries: true
+  });
+  
+  // Apply k-means clustering with 5 clusters (from low to high NDVI)
+  var clusterer = ee.Clusterer.wekaKMeans(5).train(training);
+  var clustered = clippedNDVI.cluster(clusterer);
+  
+  // Define visualization parameters for clustering
+  var clusterVisParams = {
+    min: 0,
+    max: 4,
+    palette: ['FF0000', 'FFA500', 'FFFF00', '00FF00', '008000']  // From low to high NDVI
+  };
+  
+  // Add the clustered NDVI layer to the map for the current HUC-6 region
+  Map.addLayer(clustered.visualize(clusterVisParams), {}, 'Clustered NDVI HUC-6: ' + regionName);
+  
+  // Export the clustered NDVI data as a GeoTIFF to Google Drive
+  Export.image.toDrive({
+    image: clustered,
+    description: 'Clustered_NDVI_HUC6_' + regionName,  // Name the file using the HUC-6 region name
+    folder: 'EarthEngineExports',  // Change to your desired folder
+    fileNamePrefix: 'Clustered_NDVI_HUC6_' + regionName,
+    region: regionGeometry.bounds(),
+    scale: 30,
+    maxPixels: 1e8,
+    fileFormat: 'GeoTIFF'
+  });
+}
+
+// Iterate through each HUC-6 unit and apply clustering
+midwestHUC6.evaluate(function(huc6Features) {
+  huc6Features.features.forEach(function(feature) {
+    applyClustering(ee.Feature(feature));
+  });
+});
+
+// Add the NDVI layer for the entire Missouri River Basin HUC-6 region to the map
+var ndviParams = {
+  min: -1,
+  max: 1,
+  palette: ['#000080', '#0000FF', '#00FFFF', '#00FF00', '#FFFF00', '#FF0000', '#800000']
+};
+Map.addLayer(medianNDVI.clipToCollection(midwestHUC6).visualize(ndviParams), {}, 'NDVI Missouri River Basin HUC-6');
+
+// Create Clustering legend
+var clusterColors = ['#FF0000', '#FFA500', '#FFFF00', '#00FF00', '#008000'];
+var clusterLabels = ['Very Low NDVI', 'Low NDVI', 'Moderate NDVI', 'High NDVI', 'Very High NDVI'];
+
+var clusterLegend = ui.Panel({
+  style: {position: 'bottom-right', padding: '8px 15px'}
+});
+
+clusterLegend.add(ui.Label('NDVI Clusters', {fontWeight: 'bold'}));
+
+for (var i = 0; i < clusterColors.length; i++) {
+  var colorBox = ui.Label({
+    style: {backgroundColor: clusterColors[i], padding: '8px', margin: '0 0 4px 0'}
+  });
+  var description = ui.Label({
+    value: clusterLabels[i],
+    style: {margin: '0 0 4px 6px'}
+  });
+  clusterLegend.add(ui.Panel({
+    widgets: [colorBox, description],
+    layout: ui.Panel.Layout.flow('horizontal')
+  }));
+}
+
+// Add the clustering legend to the map
+Map.add(clusterLegend);
