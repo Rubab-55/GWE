@@ -1,0 +1,160 @@
+// Load the GRIDMET Drought: CONUS Drought Indices dataset
+var droughtData = ee.ImageCollection('GRIDMET/DROUGHT');
+
+// Define the HUC-2 region for Southeastern HUC-2
+var southeasternHUC2 = ee.FeatureCollection("USGS/WBD/2017/HUC02")
+  .filter(ee.Filter.eq('huc2', '03'))  // HUC-2 code for Southeastern HUC
+  .map(function(feature) {
+    return feature.simplify(1000);  // Simplify the geometry to reduce complexity
+  });
+
+// Load the SRTM 30m Digital Elevation Data
+var srtm = ee.Image('USGS/SRTMGL1_003');
+
+// Clip the DEM to the Southeastern HUC-2 boundaries
+var clippedDEM = srtm.clipToCollection(southeasternHUC2);
+
+// Define a more representative visualization parameters for the DEM
+var demVisParams = {
+  min: 0,
+  max: 4000,
+  palette: ['000000', '0000FF', '00FFFF', '00FF00', 'FFFF00', 'FF8000', 'FF0000', 'FFFFFF']
+};
+
+// Add the DEM layer to the map with the improved color scheme
+Map.addLayer(clippedDEM, demVisParams, '30m DEM Southeastern HUC-2');
+
+// Center the map on the Southeastern HUC-2 region
+Map.centerObject(southeasternHUC2, 7);
+
+// Add the HUC-2 boundaries to the map as a FeatureCollection
+Map.addLayer(southeasternHUC2.style({color: '000000', width: 2, fillColor: '00000000'}), {}, 'Southeastern HUC-2 Boundary');
+
+// Function to compute NDVI
+function computeNDVI(image) {
+  var ndvi = image.normalizedDifference(['B8', 'B4']).rename('NDVI');
+  return ndvi;
+}
+
+// Define the date range for the dry season in the region
+var dryStartDate = '2021-06-01';
+var dryEndDate = '2021-08-31';
+
+// Load Sentinel-2 surface reflectance data for the dry season
+var sentinel2Collection = ee.ImageCollection('COPERNICUS/S2_SR')
+  .filterDate(dryStartDate, dryEndDate)
+  .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 30))  // Increased cloud cover threshold to include more images
+  .select(['B4', 'B8'])  // Ensure that only the required bands are selected
+  .map(computeNDVI);
+
+// Compute the median NDVI for the dry season
+var medianNDVI = sentinel2Collection.median().select('NDVI');
+
+// Clip the NDVI image to the simplified HUC-2 boundaries
+var clippedNDVISoutheastern = medianNDVI.clipToCollection(southeasternHUC2);
+
+// Sample points for clustering (increased number of points)
+var training = clippedNDVISoutheastern.sample({
+  region: southeasternHUC2.geometry(),
+  scale: 200,  // Increased scale to capture more data points
+  numPixels: 2000,  // Increased number of sample points
+  geometries: true
+});
+
+// Check if there are any data points in the training data
+var sampleSize = training.size();
+print('Sample size:', sampleSize);
+
+if (sampleSize.gt(0)) {
+  // Apply k-means clustering with 5 clusters (from low to high NDVI)
+  var clusterer = ee.Clusterer.wekaKMeans(5).train(training);
+  var clustered = clippedNDVISoutheastern.cluster(clusterer);
+
+  // Define visualization parameters for clustering
+  var clusterVisParams = {
+    min: 0,
+    max: 4,
+    palette: ['FF0000', 'FFA500', 'FFFF00', '00FF00', '008000']  // From low to high NDVI
+  };
+
+  // Add the clustered NDVI layer to the map
+  Map.addLayer(clustered.visualize(clusterVisParams), {}, 'Clustered NDVI Southeastern HUC-2');
+
+  // Add the NDVI layer for the Southeastern HUC-2 region to the map
+  var ndviParams = {
+    min: -1,
+    max: 1,
+    palette: ['#000080', '#0000FF', '#00FFFF', '#00FF00', '#FFFF00', '#FF0000', '#800000']
+  };
+  Map.addLayer(clippedNDVISoutheastern.visualize(ndviParams), {}, 'NDVI Southeastern HUC-2');
+
+  // Create a histogram of NDVI values
+  var ndviHistogram = ui.Chart.image.histogram({
+    image: clippedNDVISoutheastern,
+    region: southeasternHUC2.geometry(),
+    scale: 500,  // Adjust the scale to control pixel count
+    maxPixels: 1e8  // Increased maxPixels limit
+  })
+  .setOptions({
+    title: 'Histogram of NDVI values',
+    hAxis: {title: 'NDVI', minValue: -1, maxValue: 1},
+    vAxis: {title: 'Frequency'},
+    series: {
+      0: {color: 'teal'}
+    }
+  });
+
+  // Print the NDVI histogram to the console
+  print(ndviHistogram);
+
+  // Create a histogram of clustering results
+  var clusterHistogram = ui.Chart.image.histogram({
+    image: clustered,
+    region: southeasternHUC2.geometry(),
+    scale: 500,  // Adjust the scale to control pixel count
+    maxPixels: 1e8  // Increased maxPixels limit
+  })
+  .setOptions({
+    title: 'Histogram of Clustering Results',
+    hAxis: {title: 'Cluster', minValue: 0, maxValue: 4},
+    vAxis: {title: 'Frequency'},
+    series: {
+      0: {color: 'blue'}
+    }
+  });
+
+  // Print the clustering histogram to the console
+  print(clusterHistogram);
+
+  // Print the clustered image to the console for verification
+  print('Clustered NDVI Southeastern HUC-2:', clustered);
+
+  // Create Clustering legend
+  var clusterColors = ['#FF0000', '#FFA500', '#FFFF00', '#00FF00', '#008000'];
+  var clusterLabels = ['Very Low NDVI', 'Low NDVI', 'Moderate NDVI', 'High NDVI', 'Very High NDVI'];
+
+  var clusterLegend = ui.Panel({
+    style: {position: 'bottom-right', padding: '8px 15px'}
+  });
+
+  clusterLegend.add(ui.Label('NDVI Clusters', {fontWeight: 'bold'}));
+
+  for (var i = 0; i < clusterColors.length; i++) {
+    var colorBox = ui.Label({
+      style: {backgroundColor: clusterColors[i], padding: '8px', margin: '0 0 4px 0'}
+    });
+    var description = ui.Label({
+      value: clusterLabels[i],
+      style: {margin: '0 0 4px 6px'}
+    });
+    clusterLegend.add(ui.Panel({
+      widgets: [colorBox, description],
+      layout: ui.Panel.Layout.flow('horizontal')
+    }));
+  }
+
+  // Add the clustering legend to the map
+  Map.add(clusterLegend);
+} else {
+  print('No data was found in the training input. Try adjusting the date range or cloud cover threshold.');
+}
