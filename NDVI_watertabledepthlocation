@@ -1,0 +1,71 @@
+// Load the full table of coordinates
+var pixelLocations = ee.FeatureCollection('projects/gwe-condonhydrologylab/assets/pixel_locations');
+
+// Function to process and display a chunk of the data
+var processChunk = function(startIndex, chunkSize) {
+  // Convert the FeatureCollection to a list and slice the chunk
+  var chunk = ee.FeatureCollection(pixelLocations.toList(chunkSize, startIndex));
+
+  print('Processing chunk:', chunk);
+
+  // Add a buffer of 30 meters (60 m diameter) around each point
+  var bufferedChunk = chunk.map(function(feature) {
+    return feature.buffer(30); // Buffer radius in meters
+  });
+
+  // Add the current chunk to the map for visualization
+  Map.addLayer(bufferedChunk, {color: 'red'}, 'Buffered Chunk ' + startIndex);
+
+  // Load Sentinel-2 imagery
+  var sentinel2 = ee.ImageCollection('COPERNICUS/S2')
+    .filterBounds(bufferedChunk)
+    .filterDate('2021-06-01', '2021-08-31')
+    .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 10))
+    .select(['B8', 'B4']); // Select NIR (B8) and Red (B4) bands
+
+  // Calculate NDVI
+  var calculateNDVI = function(image) {
+    return image.normalizedDifference(['B8', 'B4']).rename('NDVI');
+  };
+
+  var ndviCollection = sentinel2.map(calculateNDVI);
+  var meanNDVI = ndviCollection.mean();
+
+  // Clip the NDVI layer to the chunk's geometry for display
+  var ndviClipped = meanNDVI.clip(bufferedChunk.geometry());
+
+  // Add the NDVI layer for this chunk
+  var ndviVisParams = {min: 0, max: 1, palette: ['blue', 'white', 'green']};
+  Map.addLayer(ndviClipped, ndviVisParams, 'NDVI Buffered Chunk ' + startIndex);
+
+  // Sample NDVI for the buffered areas
+  var sampledNDVI = ndviClipped.reduceRegions({
+    collection: bufferedChunk,
+    reducer: ee.Reducer.mean(),
+    scale: 10, // Sentinel-2 resolution
+    tileScale: 16 // Further increase tileScale to handle large computations
+  });
+
+  // Add the sampled NDVI points for this chunk
+  Map.addLayer(sampledNDVI, {color: 'yellow'}, 'Sampled NDVI Buffered Chunk ' + startIndex);
+
+  // Export the chunk's results
+  Export.table.toDrive({
+    collection: sampledNDVI,
+    description: 'NDVI_Buffered_Chunk_' + startIndex,
+    fileFormat: 'CSV'
+  });
+};
+
+// Chunk size and processing logic
+var chunkSize = 5000;
+var totalSize = pixelLocations.size().getInfo(); // Get the total size of the collection
+var numChunks = Math.ceil(totalSize / chunkSize); // Calculate the number of chunks
+
+print('Total Features:', totalSize);
+print('Number of Chunks:', numChunks);
+
+// Loop through each chunk and process it
+for (var i = 0; i < numChunks; i++) {
+  processChunk(i * chunkSize, chunkSize);
+}
