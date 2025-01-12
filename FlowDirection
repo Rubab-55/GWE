@@ -1,0 +1,100 @@
+// Define the region of interest: Mainland United States
+var mainlandUS = ee.Geometry.Polygon([
+  [-125.0, 49.0],
+  [-66.5, 49.0],
+  [-66.5, 24.0],
+  [-125.0, 24.0]
+]);
+
+// Load the SRTM Digital Elevation Data at 30 meters
+var srtm = ee.Image('USGS/SRTMGL1_003').clip(mainlandUS);
+
+// Calculate the slope of the terrain
+var slope = ee.Terrain.slope(srtm);
+
+// Calculate the aspect of the terrain
+var aspect = ee.Terrain.aspect(srtm);
+
+// Convert aspect to radians
+var aspectRad = aspect.multiply(Math.PI).divide(180);
+
+// Calculate the flow direction using the sine and cosine of the aspect
+var flowDirX = slope.sin().multiply(aspectRad.sin()).rename('flowDirX');
+var flowDirY = slope.sin().multiply(aspectRad.cos()).rename('flowDirY');
+
+// Define visualization parameters for flow direction components
+var flowDirXVisParams = {min: -1, max: 1, palette: ['0000FF', 'FFFFFF', 'FF0000']};
+var flowDirYVisParams = {min: -1, max: 1, palette: ['0000FF', 'FFFFFF', 'FF0000']};
+
+// Center the map on the mainland US
+Map.centerObject(mainlandUS, 5);
+
+// Add the flow direction X component layer to the map
+Map.addLayer(flowDirX, flowDirXVisParams, 'Flow Direction X');
+
+// Add the flow direction Y component layer to the map
+Map.addLayer(flowDirY, flowDirYVisParams, 'Flow Direction Y');
+
+// Add the DEM layer to the map for reference
+var demVisParams = {
+  min: 0,
+  max: 3000,
+  palette: ['000000', '00FF00', 'FFFF00', 'FF0000']
+};
+Map.addLayer(srtm, demVisParams, 'DEM');
+
+// Create a color bar for the flow direction components
+var createColorBar = function(palette, min, max) {
+  var colorBar = ui.Panel({
+    widgets: [
+      ui.Label(min),
+      ui.Thumbnail({
+        image: ee.Image.pixelLonLat().select(0).multiply(0).add(ee.Image.pixelLonLat().select(0)),
+        params: {
+          bbox: [0, 0, 1, 0.1],
+          dimensions: '100x10',
+          format: 'png',
+          min: 0,
+          max: 1,
+          palette: palette,
+        },
+        style: {stretch: 'horizontal', margin: '0 8px'},
+      }),
+      ui.Label(max)
+    ],
+    layout: ui.Panel.Layout.flow('horizontal')
+  });
+  return colorBar;
+};
+
+// Create the color bar for flow direction X component
+var flowDirXColorBar = createColorBar(['0000FF', 'FFFFFF', 'FF0000'], -1, 1);
+
+// Create a title for the flow direction X component legend
+var flowDirXLegendTitle = ui.Label({
+  value: 'Flow Direction X Colorbar',
+  style: {fontWeight: 'bold', fontSize: '12px', margin: '4px 8px'}
+});
+
+// Create the flow direction X component legend panel
+var flowDirXLegendPanel = ui.Panel({
+  widgets: [flowDirXLegendTitle, flowDirXColorBar],
+  style: {position: 'bottom-right'}
+});
+Map.add(flowDirXLegendPanel);
+
+// Create the color bar for flow direction Y component
+var flowDirYColorBar = createColorBar(['0000FF', 'FFFFFF', 'FF0000'], -1, 1);
+
+// Create a title for the flow direction Y component legend
+var flowDirYLegendTitle = ui.Label({
+  value: 'Flow Direction Y Colorbar',
+  style: {fontWeight: 'bold', fontSize: '12px', margin: '4px 8px'}
+});
+
+// Create the flow direction Y component legend panel
+var flowDirYLegendPanel = ui.Panel({
+  widgets: [flowDirYLegendTitle, flowDirYColorBar],
+  style: {position: 'bottom-left'}
+});
+Map.add(flowDirYLegendPanel);
