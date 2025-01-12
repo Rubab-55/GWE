@@ -1,0 +1,51 @@
+// Load the Global Surface Water dataset
+var dataset = ee.Image('JRC/GSW1_3/GlobalSurfaceWater');
+var waterTransition = dataset.select('transition');
+
+// Define visualization parameters for the reclassified raster
+var reclassVis = {
+  min: 1,
+  max: 2,
+  palette: ['99d9ea', '0000ff'] // Light blue for ever water, blue for ever permanent water
+};
+
+// Load your uploaded TIFF file as an asset
+var tiffAsset = ee.Image('projects/gwe-condonhydrologylab/assets/CONUS2_0_Final250m_Mask');
+
+// Create a mask from the TIFF to define the clipping region
+var tiffMask = tiffAsset.gt(0); // Consider only non-zero regions
+
+// Clip the water transition data to the TIFF mask
+var clippedTransition = waterTransition.updateMask(tiffMask);
+
+// Reclassify the transition categories:
+// Categories for "ever permanent water" (2): 1, 2, 3, 7, 8, 9
+var everPermanentWater = clippedTransition.eq(1) // Permanent
+  .or(clippedTransition.eq(2))                   // New permanent
+  .or(clippedTransition.eq(3))                   // Lost permanent
+  .or(clippedTransition.eq(7))                   // Seasonal to permanent
+  .or(clippedTransition.eq(8))                   // Permanent to seasonal
+  .or(clippedTransition.eq(9));                  // Ephemeral permanent
+
+// Categories for "ever water" (1): 4, 5, 6, 10
+var everWater = clippedTransition.eq(4) // Seasonal water
+  .or(clippedTransition.eq(5))           // New seasonal water
+  .or(clippedTransition.eq(6))           // Lost seasonal water
+  .or(clippedTransition.eq(10));         // Ephemeral seasonal
+
+// Combine the reclassified layers into a single raster
+var reclassified = everWater.multiply(1).add(everPermanentWater.multiply(2));
+
+// Visualize the reclassified raster
+Map.centerObject(tiffMask.geometry(), 6); // Center the map on the TIFF region
+Map.addLayer(reclassified, reclassVis, 'Reclassified Water Transition');
+
+// Export the reclassified raster as a GeoTIFF, clipped to the TIFF region
+Export.image.toDrive({
+  image: reclassified,
+  description: 'Reclassified_Water_Bodies',
+  scale: 30, // Resolution in meters
+  region: tiffMask.geometry().bounds(), // Export only the area covered by the TIFF
+  maxPixels: 1e13,
+  fileFormat: 'GeoTIFF'
+});
