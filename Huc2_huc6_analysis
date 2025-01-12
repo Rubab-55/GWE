@@ -1,0 +1,173 @@
+// Load the GRIDMET Drought: CONUS Drought Indices dataset
+var droughtData = ee.ImageCollection('GRIDMET/DROUGHT');
+
+// --- HUC-2 Operations ---
+
+// Define the HUC-2 region for Missouri River Basin
+var missouriHUC2 = ee.FeatureCollection("USGS/WBD/2017/HUC02")
+  .filter(ee.Filter.eq('huc2', '10'))  // HUC2 code '10' corresponds to the Missouri River Basin
+  .map(function(feature) {
+    return feature.simplify(1000);  // Simplify the geometry to reduce complexity
+  });
+
+// Load the SRTM 30m Digital Elevation Data
+var srtm = ee.Image('USGS/SRTMGL1_003');
+
+// Clip the DEM to the Missouri River Basin HUC-2 boundaries
+var clippedDEMMissouriHUC2 = srtm.clipToCollection(missouriHUC2);
+
+// Define visualization parameters for the DEM
+var demVisParams = {
+  min: 0,
+  max: 4000,
+  palette: ['000000', '0000FF', '00FFFF', '00FF00', 'FFFF00', 'FF8000', 'FF0000', 'FFFFFF']
+};
+
+// Add the clipped DEM layer to the map for HUC-2
+Map.addLayer(clippedDEMMissouriHUC2, demVisParams, '30m DEM Missouri HUC-2');
+
+// Load the NLCD dataset (2019 version)
+var nlcd = ee.Image('USGS/NLCD_RELEASES/2019_REL/NLCD/2019');
+
+// Create a mask to exclude urban, farmlands, and pastures
+var excludedLandCovers = nlcd.select('landcover').eq(21)  // Developed, Open Space
+  .or(nlcd.select('landcover').eq(22))  // Developed, Low Intensity
+  .or(nlcd.select('landcover').eq(23))  // Developed, Medium Intensity
+  .or(nlcd.select('landcover').eq(24))  // Developed, High Intensity
+  .or(nlcd.select('landcover').eq(81))  // Pasture/Hay
+  .or(nlcd.select('landcover').eq(82)); // Cultivated Crops
+
+// Function to compute NDVI using Landsat 8 Collection 2
+function computeNDVI(image) {
+  var ndvi = image.normalizedDifference(['SR_B5', 'SR_B4']).rename('NDVI');
+  return ndvi;
+}
+
+// Define the date range for the dry season in the Missouri River Basin region
+var dryStartDate = '2021-10-01';
+var dryEndDate = '2021-11-30';
+
+// Load Landsat 8 Collection 2 surface reflectance data for the dry season
+var landsat8Collection = ee.ImageCollection('LANDSAT/LC08/C02/T1_L2')
+  .filterDate(dryStartDate, dryEndDate)
+  .filter(ee.Filter.lt('CLOUD_COVER', 80))
+  .map(function(image) {
+    // Apply scaling factors to Landsat Collection 2 data
+    return image
+      .select(['SR_B5', 'SR_B4'])
+      .multiply(0.0000275)
+      .add(-0.2)
+      .copyProperties(image, ['system:time_start']);
+  })
+  .map(computeNDVI);
+
+// Compute the median NDVI for the dry season
+var medianNDVIHUC2 = landsat8Collection.median().select('NDVI');
+
+// Clip the NDVI image to the simplified Missouri HUC-2 boundaries
+var clippedNDVIMissouriHUC2 = medianNDVIHUC2.clipToCollection(missouriHUC2);
+
+// Apply the NLCD mask to exclude the land cover types we don't want
+var maskedNDVIHUC2 = clippedNDVIMissouriHUC2.updateMask(excludedLandCovers.not());
+
+// Sample points for clustering
+var trainingHUC2 = maskedNDVIHUC2.sample({
+  region: missouriHUC2.geometry(),
+  scale: 30,  // Adjust the scale to capture more data points
+  numPixels: 1000,  // Increased number of sample points for better clustering
+  geometries: true
+});
+
+// Apply k-means clustering for HUC-2
+if (trainingHUC2.size().gt(0)) {
+  var clustererHUC2 = ee.Clusterer.wekaKMeans(5).train(trainingHUC2);
+  var clusteredHUC2 = maskedNDVIHUC2.cluster(clustererHUC2);
+
+  var clusterVisParams = {
+    min: 0,
+    max: 4,
+    palette: ['B0B0B0', 'D3D3D3', 'FFFF00', '00FF00', '008000']  // Grey, Lighter Grey, Yellow, Green, Dark Green
+  };
+
+  Map.addLayer(clusteredHUC2.visualize(clusterVisParams), {}, 'Clustered NDVI Missouri HUC-2');
+}
+
+// --- HUC-6 Operations ---
+
+// Define the HUC-6 region for Missouri River Basin
+var midwestHUC6 = ee.FeatureCollection("USGS/WBD/2017/HUC06")
+  .filter(ee.Filter.stringContains('huc6', '10'))  // HUC-6 code for Missouri River Basin
+  .map(function(feature) {
+    return feature.simplify(1000);  // Simplify the geometry to reduce complexity
+  });
+
+// Clip the DEM to the Missouri River Basin HUC-6 boundaries
+var clippedDEMMissouriHUC6 = srtm.clipToCollection(midwestHUC6);
+
+// Add the DEM layer to the map for HUC-6
+Map.addLayer(clippedDEMMissouriHUC6, demVisParams, '30m DEM Missouri River Basin HUC-6');
+
+// Apply the same NLCD mask to Sentinel-2 data for HUC-6
+var sentinel2Collection = ee.ImageCollection('COPERNICUS/S2_SR')
+  .filterDate(dryStartDate, dryEndDate)
+  .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 20))
+  .map(computeNDVI);
+
+// Compute the median NDVI for the dry season for HUC-6
+var medianNDVIHUC6 = sentinel2Collection.median().select('NDVI');
+
+// Apply the NLCD mask to exclude the land cover types we don't want for HUC-6
+var maskedNDVIHUC6 = medianNDVIHUC6.updateMask(excludedLandCovers.not());
+
+// Function to apply clustering to each HUC-6 unit
+function applyClustering(huc6Region) {
+  var regionGeometry = huc6Region.geometry();
+  
+  var clippedNDVI = maskedNDVIHUC6.clip(regionGeometry);
+  
+  var trainingHUC6 = clippedNDVI.sample({
+    region: regionGeometry,
+    scale: 30,
+    numPixels: 1000,
+    geometries: true
+  });
+  
+  var clustererHUC6 = ee.Clusterer.wekaKMeans(5).train(trainingHUC6);
+  var clusteredHUC6 = clippedNDVI.cluster(clustererHUC6);
+  
+  Map.addLayer(clusteredHUC6.visualize(clusterVisParams), {}, 'Clustered NDVI HUC-6: ' + huc6Region.get('name'));
+}
+
+// Iterate through each HUC-6 unit and apply clustering
+midwestHUC6.evaluate(function(huc6Features) {
+  huc6Features.features.forEach(function(feature) {
+    applyClustering(ee.Feature(feature));
+  });
+});
+
+// Create a legend for both HUC-2 and HUC-6 clustering
+var clusterColors = ['#B0B0B0', '#D3D3D3', '#FFFF00', '#00FF00', '#008000'];
+var clusterLabels = ['Very Low NDVI', 'Low NDVI', 'Moderate NDVI', 'High NDVI', 'Very High NDVI'];
+
+var clusterLegend = ui.Panel({
+  style: {position: 'bottom-right', padding: '8px 15px'}
+});
+
+clusterLegend.add(ui.Label('NDVI Clusters', {fontWeight: 'bold'}));
+
+for (var i = 0; i < clusterColors.length; i++) {
+  var colorBox = ui.Label({
+    style: {backgroundColor: clusterColors[i], padding: '8px', margin: '0 0 4px 0'}
+  });
+  var description = ui.Label({
+    value: clusterLabels[i],
+    style: {margin: '0 0 4px 6px'}
+  });
+  clusterLegend.add(ui.Panel({
+    widgets: [colorBox, description],
+    layout: ui.Panel.Layout.Flow('horizontal')
+  }));
+}
+
+// Add the clustering legend to the map
+Map.add(clusterLegend);
