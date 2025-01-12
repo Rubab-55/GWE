@@ -1,0 +1,112 @@
+// Load the Global Surface Water dataset
+var dataset = ee.Image('JRC/GSW1_3/GlobalSurfaceWater');
+
+// Select the "transition" band
+var waterTransition = dataset.select('transition');
+
+// Define visualization parameters
+var transitionVis = {
+  min: 0,
+  max: 10,
+  palette: [
+    'ffffff', // No Change
+    '99d9ea', // New Permanent Water
+    '0000ff', // New Seasonal Water
+    'd9d9d9', // Permanent Water Loss
+    '007fff', // Seasonal Water Loss
+    '80ffbf', // New Wetland Conversion
+    '00ff00', // Stable Wetland
+    'ffff00', // Water Gain
+    'ff0000', // New Permanent Land
+    'ff80bf'  // Wetland Loss
+  ]
+};
+
+// Load your uploaded TIFF file as an asset
+var tiffAsset = ee.Image('projects/gwe-condonhydrologylab/assets/CONUS2_0_Final250m_Mask');
+
+// Create a mask from the TIFF to define the clipping region
+// Assuming the TIFF has meaningful data values; otherwise, adapt the mask logic
+var tiffMask = tiffAsset.gt(0); // Mask where TIFF values are greater than 0
+var clipRegion = tiffMask.geometry(); // Extract the geometry from the mask
+
+// Clip the water transition data to the TIFF mask
+var clippedWaterTransition = waterTransition.updateMask(tiffMask);
+
+// Add the clipped layer to the map
+Map.centerObject(clipRegion, 5); // Adjust zoom level if necessary
+Map.addLayer(clippedWaterTransition, transitionVis, 'Clipped Water Transition');
+
+// Add a legend for better interpretation
+var legend = ui.Panel({
+  style: {
+    position: 'bottom-left',
+    padding: '8px 15px'
+  }
+});
+
+var legendTitle = ui.Label({
+  value: 'Water Transition Legend',
+  style: {fontWeight: 'bold', fontSize: '16px', margin: '0 0 6px 0', padding: '0'}
+});
+
+legend.add(legendTitle);
+
+var palette = transitionVis.palette;
+var names = [
+  'No Change', 'New Permanent Water', 'New Seasonal Water', 'Permanent Water Loss', 
+  'Seasonal Water Loss', 'New Wetland Conversion', 'Stable Wetland', 'Water Gain', 
+  'New Permanent Land', 'Wetland Loss'
+];
+
+var makeRow = function(color, name) {
+  var colorBox = ui.Label({
+    style: {
+      backgroundColor: color,
+      padding: '8px',
+      margin: '0 0 4px 0'
+    }
+  });
+
+  var description = ui.Label({
+    value: name,
+    style: {margin: '0 0 4px 6px'}
+  });
+
+  return ui.Panel({
+    widgets: [colorBox, description],
+    layout: ui.Panel.Layout.Flow('horizontal')
+  });
+};
+
+for (var i = 0; i < palette.length; i++) {
+  legend.add(makeRow(palette[i], names[i]));
+}
+
+Map.add(legend);
+var waterTypeSelector = ui.Select({
+    items: [
+        {label: 'No Change', value: 0},
+        {label: 'New Permanent Water', value: 1},
+        {label: 'New Seasonal Water', value: 2},
+        // Add other values as needed
+    ],
+    onChange: function(selectedValue) {
+        var filteredLayer = clippedWaterTransition.updateMask(waterTransition.eq(selectedValue));
+        Map.layers().set(0, ui.Map.Layer(filteredLayer, transitionVis, 'Filtered Transition'));
+    }
+});
+// Export the clipped water transition image as a PNG
+Export.image.toDrive({
+  image: clippedWaterTransition.visualize(transitionVis),
+  description: 'WaterTransitionMap',
+  folder: 'EarthEngineExports',
+  fileNamePrefix: 'Water_Transition',
+  region: clipRegion,
+  scale: 30, // Adjust scale if needed
+  maxPixels: 1e13
+});
+
+
+ui.root.add(waterTypeSelector);
+
