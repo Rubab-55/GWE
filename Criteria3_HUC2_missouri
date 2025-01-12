@@ -1,0 +1,122 @@
+// Define the HUC-2 code for Missouri River Basin (HUC-2: '10')
+var missouriHUC2Code = '10';  // HUC-2 code for Missouri
+
+// Load HUC-2 boundaries
+var huc2 = ee.FeatureCollection("USGS/WBD/2017/HUC02");
+
+// Filter HUC-2 boundaries to include only the Missouri River Basin
+var missouriHUC2 = huc2.filter(ee.Filter.eq('huc2', missouriHUC2Code));
+
+// Simplify the HUC-2 boundaries to reduce complexity
+var simplifiedMissouriHUC2 = missouriHUC2.map(function(feature) {
+  return feature.simplify(2000);  // Adjust tolerance as needed to reduce computational load
+});
+
+// Define the date ranges for 1990-2018 and 2018-2023
+var startDate1990 = '1990-07-01';
+var endDate2018 = '2018-12-31';
+var startDate2018 = '2019-01-01';
+var endDate2023 = '2023-07-31';
+
+// Load the NLCD dataset
+var nlcd = ee.Image('USGS/NLCD_RELEASES/2019_REL/NLCD/2019');
+var urbanMask = nlcd.select('landcover').eq(21)
+  .or(nlcd.select('landcover').eq(22))
+  .or(nlcd.select('landcover').eq(23))
+  .or(nlcd.select('landcover').eq(24));
+
+// Cloud masking and scaling
+function maskL8sr(image) {
+  var qaMask = image.select('QA_PIXEL').bitwiseAnd(parseInt('11111', 2)).eq(0);
+  var saturationMask = image.select('QA_RADSAT').eq(0);
+
+  // Apply the scaling factors to the appropriate bands.
+  var opticalBands = image.select('SR_B.').multiply(0.0000275).add(-0.2);
+  var thermalBands = image.select('ST_B.*').multiply(0.00341802).add(149.0);
+
+  // Replace the original bands with the scaled ones and apply the masks.
+  return image.addBands(opticalBands, null, true)
+      .addBands(thermalBands, null, true)
+      .updateMask(qaMask)
+      .updateMask(saturationMask)
+      .updateMask(urbanMask.not()); // Exclude urban areas
+}
+
+// Function to compute NDVI
+function computeNDVI(image) {
+  var ndvi = image.normalizedDifference(['SR_B5', 'SR_B4']).rename('NDVI');
+  return image.addBands(ndvi);
+}
+
+// Function to process the Missouri HUC2 region for a specific time range
+function processRegion(regionGeom, regionName, startDate, endDate, descriptionSuffix) {
+  var landsatCollection = ee.ImageCollection("LANDSAT/LC08/C02/T1_L2")
+    .filterBounds(regionGeom)
+    .filterDate(startDate, endDate)
+    .filter(ee.Filter.lt('CLOUD_COVER', 10))  // Relaxed cloud cover filter
+    .map(maskL8sr)
+    .map(computeNDVI);
+
+  var stdDevNDVI = landsatCollection.select('NDVI').reduce(ee.Reducer.stdDev());
+  var stdDevNDVIClipped = stdDevNDVI.clip(regionGeom);
+
+  // Sample points for k-means clustering
+  var training = stdDevNDVIClipped.sample({
+    region: regionGeom,
+    scale: 90,  // Increase the scale to reduce computation time
+    numPixels: 500,  // Reduced number of sample points
+    geometries: true
+  });
+
+  // Apply k-means clustering
+  var clusterer = ee.Clusterer.wekaKMeans(5).train(training);
+  var clustered = stdDevNDVIClipped.cluster(clusterer);
+
+  // Calculate mean NDVI std dev for each cluster
+  var clusterMeans = ee.List.sequence(0, 4).map(function(clusterIndex) {
+    var meanNDVIStdDev = stdDevNDVIClipped.updateMask(clustered.eq(ee.Image.constant(clusterIndex))).reduceRegion({
+      reducer: ee.Reducer.mean(),
+      geometry: regionGeom,
+      scale: 90,
+      bestEffort: true
+    }).get('NDVI_stdDev');
+    return ee.Feature(null, {clusterIndex: clusterIndex, meanNDVIStdDev: meanNDVIStdDev});
+  });
+
+  // Sort the clusters by mean NDVI std dev
+  var clusterMeanFeatures = ee.FeatureCollection(clusterMeans);
+  var sortedClusterMeans = clusterMeanFeatures.sort('meanNDVIStdDev', false); // Sort descending
+  var sortedClusterIndices = sortedClusterMeans.aggregate_array('clusterIndex');
+
+  // Assign ranks to clusters
+  var clusterRanks = ee.List.sequence(1, 5); // 1 (highest std dev) to 5 (lowest std dev)
+  var rankedClusters = clustered.remap(sortedClusterIndices, clusterRanks);
+
+  // Export the ranked clustered image for the given time period
+  Export.image.toDrive({
+    image: rankedClusters,  // The ranked clustered NDVI image
+    description: 'Ranked_Clusters_NDVI_Missouri_HUC2_' + descriptionSuffix,  // Task description
+    folder: 'EarthEngineExports',  // Google Drive folder
+    fileNamePrefix: 'Ranked_Clusters_NDVI_Missouri_HUC2_' + descriptionSuffix,  // Output file name
+    scale: 90,  // Increase scale to reduce pixel count
+    region: regionGeom,  // Export region
+    maxPixels: 1e12,  // Reduce max pixels to avoid timeouts
+    crs: 'EPSG:4326',  // Coordinate Reference System
+    fileFormat: 'GeoTIFF'  // Output file format
+  });
+
+  return rankedClusters;
+}
+
+// Process and export the Missouri HUC2 region for 1990-2018
+var processedRegion1990to2018 = processRegion(simplifiedMissouriHUC2.geometry(), 'Missouri HUC2', startDate1990, endDate2018, '1990to2018');
+
+// Process and export the Missouri HUC2 region for 2018-2023
+var processedRegion2018to2023 = processRegion(simplifiedMissouriHUC2.geometry(), 'Missouri HUC2', startDate2018, endDate2023, '2018to2023');
+
+// Set map center and zoom to fit the Missouri HUC2 region
+Map.centerObject(missouriHUC2, 6);
+
+// Add the layers to visualize
+Map.addLayer(processedRegion1990to2018, {min: 1, max: 5, palette: ['#ff0000', '#ff7f00', '#ffff00', '#7fff00', '#00ff00']}, 'Ranked Clusters 1990-2018');
+Map.addLayer(processedRegion2018to2023, {min: 1, max: 5, palette: ['#ff0000', '#ff7f00', '#ffff00', '#7fff00', '#00ff00']}, 'Ranked Clusters 2018-2023');
