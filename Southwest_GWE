@@ -1,0 +1,104 @@
+// Geometry covering Nevada, Colorado, Utah, and California
+var targetArea = ee.Geometry.Rectangle([-125, 32, -102, 42]);
+
+// Define the date range for the Landsat 8 data (March 2021 to May 2021)
+var startDate = '2021-03-01';
+var endDate = '2021-05-30';
+
+// Load the SRTM Digital Elevation Data
+var srtm = ee.Image('USGS/SRTMGL1_003');
+
+// Define a land mask: elevation > 0
+var landMask = srtm.gt(0);
+
+// Cloud masking and scaling
+function maskL8sr(image) {
+  image = image.updateMask(landMask).clip(targetArea);
+  var qaMask = image.select('QA_PIXEL').bitwiseAnd(parseInt('11111', 2)).eq(0);
+  var saturationMask = image.select('QA_RADSAT').eq(0);
+
+  // Apply the scaling factors to the appropriate bands.
+  var opticalBands = image.select('SR_B.').multiply(0.0000275).add(-0.2);
+  var thermalBands = image.select('ST_B.*').multiply(0.00341802).add(149.0);
+
+  // Replace the original bands with the scaled ones and apply the masks.
+  return image.addBands(opticalBands, null, true)
+      .addBands(thermalBands, null, true)
+      .updateMask(qaMask)
+      .updateMask(saturationMask);
+}
+
+// Function to compute NDVI
+function ndvi(image) {
+  var ndvi_image = image.normalizedDifference(['SR_B5', 'SR_B4']).rename('NDVI');
+  return image.addBands(ndvi_image);
+}
+
+// Load the updated Landsat 8 Collection 2 Level 2 dataset and filter by date and cloud cover
+var landsatCollection = ee.ImageCollection('LANDSAT/LC08/C02/T1_L2')
+  .filterBounds(targetArea)
+  .filterDate(startDate, endDate)
+  .filter(ee.Filter.lt('CLOUD_COVER', 5))
+  .map(maskL8sr)
+  .map(ndvi);
+
+// Get the median image
+var medianImage = landsatCollection.median().select('NDVI').clip(targetArea);
+
+// Classify areas with NDVI > 0.6 as high likelihood of GWE and NDVI <= 0.6 as low likelihood
+var gweLikelihood = medianImage.expression(
+  'b("NDVI") > 0.6 ? 1' +
+  ' : 0'
+).rename('GWE_Likelihood');
+
+// Define GWE likelihood visualization parameters
+var gweVisParams = {
+  min: 0,
+  max: 1,
+  palette: ['blue', 'green'],
+  bands: ['GWE_Likelihood']
+};
+
+// Add the GWE likelihood layer to the map
+Map.centerObject(targetArea, 6);
+Map.addLayer(gweLikelihood.updateMask(gweLikelihood.neq(0)).visualize(gweVisParams), {}, 'GWE Likelihood');
+
+// Create a GWE likelihood color bar with labels
+var createColorBar = function(palette, labels) {
+  var colorBar = ui.Panel({
+    widgets: [
+      ui.Label(labels[0]),
+      ui.Thumbnail({
+        image: ee.Image.pixelLonLat().select(0).multiply(0).add(ee.Image.pixelLonLat().select(0)),
+        params: {
+          bbox: [0, 0, 1, 0.1],
+          dimensions: '100x10',
+          format: 'png',
+          min: 0,
+          max: 1,
+          palette: palette,
+        },
+        style: {stretch: 'horizontal', margin: '0 8px'},
+      }),
+      ui.Label(labels[1])
+    ],
+    layout: ui.Panel.Layout.flow('horizontal')
+  });
+  return colorBar;
+};
+
+// Create the color bar for GWE likelihood with labels
+var gweColorBar = createColorBar(['blue', 'green'], ['Low GWE Likelihood', 'High GWE Likelihood']);
+
+// Create a title for the GWE likelihood legend
+var gweLegendTitle = ui.Label({
+  value: 'GWE Likelihood Colorbar',
+  style: {fontWeight: 'bold', fontSize: '12px', margin: '4px 8px'}
+});
+
+// Position the GWE likelihood legend
+var gweLegendPanel = ui.Panel({
+  widgets: [gweLegendTitle, gweColorBar],
+  style: {position: 'bottom-left'}
+});
+Map.add(gweLegendPanel);
