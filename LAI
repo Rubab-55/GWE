@@ -1,0 +1,129 @@
+// Simplified Geometry of the Southwest United States
+var southwestUS = ee.Geometry.Rectangle([-125, 31, -102, 37]);
+
+// Define the date range for the Landsat 8 data (March 2021 to May 2021)
+var startDate = '2021-03-01';
+var endDate = '2021-05-30';
+
+// Load the ESA WorldCover dataset for 2020
+var worldCover = ee.Image('ESA/WorldCover/v100/2020');
+var landMask = worldCover.neq(40); // 40 corresponds to the water class
+
+// Cloud masking and scaling
+function maskL8sr(image) {
+  // Bit 0 - Fill
+  // Bit 1 - Dilated Cloud
+  // Bit 2 - Cirrus
+  // Bit 3 - Cloud
+  // Bit 4 - Cloud Shadow
+  image = image.clip(southwestUS);
+  var qaMask = image.select('QA_PIXEL').bitwiseAnd(parseInt('11111', 2)).eq(0);
+  var saturationMask = image.select('QA_RADSAT').eq(0);
+
+  // Apply the scaling factors to the appropriate bands.
+  var opticalBands = image.select('SR_B.').multiply(0.0000275).add(-0.2);
+  var thermalBands = image.select('ST_B.*').multiply(0.00341802).add(149.0);
+
+  // Replace the original bands with the scaled ones and apply the masks.
+  return image.addBands(opticalBands, null, true)
+      .addBands(thermalBands, null, true)
+      .updateMask(qaMask)
+      .updateMask(saturationMask)
+      .updateMask(landMask); // Apply land mask to exclude ocean tiles
+}
+
+// Function to compute NDVI
+function computeNDVI(image) {
+  var ndvi = image.normalizedDifference(['SR_B5', 'SR_B4']).rename('NDVI');
+  return image.addBands(ndvi);
+}
+
+// Function to compute LAI from NDVI
+function computeLAI(image) {
+  var lai = image.expression(
+    '3.618 * NDVI - 0.118', {
+      'NDVI': image.select('NDVI')
+    }).rename('LAI');
+  return image.addBands(lai);
+}
+
+// Load the Landsat 8 Collection 2 Level 2 dataset and filter by date and cloud cover
+var landsatCollection = ee.ImageCollection("LANDSAT/LC08/C02/T1_L2")
+  .filterBounds(southwestUS)
+  .filterDate(startDate, endDate)
+  .filter(ee.Filter.lt('CLOUD_COVER', 5))
+  .map(maskL8sr)
+  .map(computeNDVI)
+  .map(computeLAI);
+
+// Get first image
+print(landsatCollection.first());
+
+// Define NDVI visualization parameters
+var ndviParams = {min: -1, max: 1, palette: ['blue', 'white', 'green']};
+
+// Define LAI visualization parameters
+var laiParams = {min: 0, max: 6, palette: ['yellow', 'green']};
+
+// Add the NDVI layer to the map
+Map.centerObject(southwestUS, 6);
+Map.addLayer(landsatCollection.select('NDVI').median().clip(southwestUS), ndviParams, 'NDVI March-May 2021');
+
+// Add the LAI layer to the map
+Map.addLayer(landsatCollection.select('LAI').median().clip(southwestUS), laiParams, 'LAI March-May 2021');
+
+// Create an NDVI color bar
+var createColorBar = function(palette, min, max) {
+  var colorBar = ui.Panel({
+    widgets: [
+      ui.Label(min),
+      ui.Thumbnail({
+        image: ee.Image.pixelLonLat().select(0).multiply(0).add(ee.Image.pixelLonLat().select(0)),
+        params: {
+          bbox: [0, 0, 1, 0.1],
+          dimensions: '100x10',
+          format: 'png',
+          min: 0,
+          max: 1,
+          palette: palette,
+        },
+        style: {stretch: 'horizontal', margin: '0 8px'},
+      }),
+      ui.Label(max)
+    ],
+    layout: ui.Panel.Layout.flow('horizontal')
+  });
+  return colorBar;
+};
+
+// Create the color bar for NDVI
+var ndviColorBar = createColorBar(['blue', 'white', 'green'], -1, 1);
+
+// Create a title for the NDVI legend
+var ndviLegendTitle = ui.Label({
+  value: 'NDVI Colorbar',
+  style: {fontWeight: 'bold', fontSize: '12px', margin: '4px 8px'}
+});
+
+// Create the NDVI legend panel
+var ndviLegendPanel = ui.Panel({
+  widgets: [ndviLegendTitle, ndviColorBar],
+  style: {position: 'bottom-right'}
+});
+Map.add(ndviLegendPanel);
+
+// Create the color bar for LAI
+var laiColorBar = createColorBar(['yellow', 'green'], 0, 6);
+
+// Create a title for the LAI legend
+var laiLegendTitle = ui.Label({
+  value: 'LAI Colorbar',
+  style: {fontWeight: 'bold', fontSize: '12px', margin: '4px 8px'}
+});
+
+// Create the LAI legend panel
+var laiLegendPanel = ui.Panel({
+  widgets: [laiLegendTitle, laiColorBar],
+  style: {position: 'bottom-left'}
+});
+Map.add(laiLegendPanel);
