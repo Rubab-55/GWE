@@ -1,0 +1,278 @@
+// Load the GRIDMET Drought: CONUS Drought Indices dataset
+var droughtData = ee.ImageCollection('GRIDMET/DROUGHT');
+
+// Define a geometry for the mainland United States
+var mainlandUS = ee.Geometry.Rectangle([-125, 24, -66.5, 49.5]);
+
+// Load HUC-2 boundaries
+var huc2 = ee.FeatureCollection("USGS/WBD/2017/HUC02");
+
+// Simplify the HUC-2 boundaries to reduce complexity
+var simplifiedHUC2 = huc2.filterBounds(mainlandUS).map(function(feature) {
+  return feature.simplify(1000);  // Adjust tolerance as needed
+});
+
+// Select specific HUC-2 regions across the mainland US
+
+// Western HUC-2 (e.g., California)
+var westernHUC2 = simplifiedHUC2.filter(ee.Filter.eq('huc2', '18')); // California
+
+// Eastern HUC-2 (e.g., Upper Mississippi)
+var easternHUC2 = simplifiedHUC2.filter(ee.Filter.eq('huc2', '02')); // Upper Mississippi
+
+// Midwestern HUC-2 (e.g., Missouri River Basin)
+var midwesternHUC2 = simplifiedHUC2.filter(ee.Filter.eq('huc2', '10')); // Missouri River Basin
+
+// Southeastern HUC-2 (e.g., Tennessee)
+var southeasternHUC2 = simplifiedHUC2.filter(ee.Filter.eq('huc2', '06')); // Tennessee
+
+// Northeastern HUC-2 (e.g., New England)
+var northeasternHUC2 = simplifiedHUC2.filter(ee.Filter.eq('huc2', '01')); // New England
+
+// Texas-Gulf Region (e.g., HUC-2 code '12')
+var texasGulfHUC2 = simplifiedHUC2.filter(ee.Filter.eq('huc2', '12')); // Texas-Gulf
+
+// Ohio Region (e.g., HUC-2 code '05')
+var ohioHUC2 = simplifiedHUC2.filter(ee.Filter.eq('huc2', '05')); // Ohio
+
+// Great Basin Region (e.g., HUC-2 code '16')
+var greatBasinHUC2 = simplifiedHUC2.filter(ee.Filter.eq('huc2', '16')); // Great Basin
+
+// Arkansas-White-Red Region (e.g., HUC-2 code '11')
+var arkansasWhiteRedHUC2 = simplifiedHUC2.filter(ee.Filter.eq('huc2', '11')); // Arkansas-White-Red
+
+// Great Lakes Region (e.g., HUC-2 code '04')
+var greatLakesHUC2 = simplifiedHUC2.filter(ee.Filter.eq('huc2', '04')); // Great Lakes
+
+// Pacific Northwest Region (e.g., HUC-2 code '17')
+var pacificNorthwestHUC2 = simplifiedHUC2.filter(ee.Filter.eq('huc2', '17')); // Pacific Northwest
+
+// Lower Mississippi Region (e.g., HUC-2 code '08')
+var lowerMississippiHUC2 = simplifiedHUC2.filter(ee.Filter.eq('huc2', '08')); // Lower Mississippi
+
+// Souris-Red-Rainy Region (e.g., HUC-2 code '09')
+var sourisRedRainyHUC2 = simplifiedHUC2.filter(ee.Filter.eq('huc2', '09')); // Souris-Red-Rainy
+
+// Upper Colorado Region (e.g., HUC-2 code '14')
+var upperColoradoHUC2 = simplifiedHUC2.filter(ee.Filter.eq('huc2', '14')); // Upper Colorado
+
+// Lower Colorado Region (e.g., HUC-2 code '15')
+var lowerColoradoHUC2 = simplifiedHUC2.filter(ee.Filter.eq('huc2', '15')); // Lower Colorado
+
+// Add North Carolina and South Carolina HUC-2 regions
+var carolinasHUC2 = simplifiedHUC2.filter(ee.Filter.eq('huc2', '03')); // Carolinas (North and South Carolina)
+
+// Define years for the time series
+var years = [2015, 2016, 2017, 2018, 2019, 2020, 2021, 2022, 2023];
+
+// Function to calculate the annual average PDSI for a selected HUC-2 region
+function calculatePDSIForHUC2(region, year) {
+  var startDate = ee.Date.fromYMD(year, 1, 1);
+  var endDate = ee.Date.fromYMD(year, 12, 31);
+  var annualDroughtData = droughtData.filterDate(startDate, endDate).filterBounds(region);
+  var annualPDSI = annualDroughtData.select('pdsi').mean().clip(region.geometry());
+  return annualPDSI.set('year', year);
+}
+
+// Function to create image collections for each region
+function createPDSIImageCollection(region, name) {
+  return ee.ImageCollection(years.map(function(year) {
+    return calculatePDSIForHUC2(region, year).visualize({
+      min: -10,
+      max: 10,
+      palette: ['FF0000', 'FFA500', 'FFFF00', '00FF00', '00FFFF', '0000FF', '800080']
+    }).set('year', year);
+  }));
+}
+
+// Create PDSI image collections for each region
+var westernPDSICollection = createPDSIImageCollection(westernHUC2, 'Western');
+var easternPDSICollection = createPDSIImageCollection(easternHUC2, 'Eastern');
+var midwesternPDSICollection = createPDSIImageCollection(midwesternHUC2, 'Midwestern');
+var southeasternPDSICollection = createPDSIImageCollection(southeasternHUC2, 'Southeastern');
+var northeasternPDSICollection = createPDSIImageCollection(northeasternHUC2, 'Northeastern');
+var texasGulfPDSICollection = createPDSIImageCollection(texasGulfHUC2, 'Texas-Gulf');
+var ohioPDSICollection = createPDSIImageCollection(ohioHUC2, 'Ohio');
+var greatBasinPDSICollection = createPDSIImageCollection(greatBasinHUC2, 'Great Basin');
+var arkansasWhiteRedPDSICollection = createPDSIImageCollection(arkansasWhiteRedHUC2, 'Arkansas-White-Red');
+var greatLakesPDSICollection = createPDSIImageCollection(greatLakesHUC2, 'Great Lakes');
+var pacificNorthwestPDSICollection = createPDSIImageCollection(pacificNorthwestHUC2, 'Pacific Northwest');
+var lowerMississippiPDSICollection = createPDSIImageCollection(lowerMississippiHUC2, 'Lower Mississippi');
+var sourisRedRainyPDSICollection = createPDSIImageCollection(sourisRedRainyHUC2, 'Souris-Red-Rainy');
+var upperColoradoPDSICollection = createPDSIImageCollection(upperColoradoHUC2, 'Upper Colorado');
+var lowerColoradoPDSICollection = createPDSIImageCollection(lowerColoradoHUC2, 'Lower Colorado');
+var carolinasPDSICollection = createPDSIImageCollection(carolinasHUC2, 'Carolinas');
+
+// Center the map over the midwestern HUC-2 region
+Map.centerObject(midwesternHUC2, 6);
+
+// Add the selected HUC-2 boundaries to the map
+function addHUC2Layer(region, name) {
+  Map.addLayer(region.style({
+    color: '000000',  // Black boundaries
+    width: 2,
+    fillColor: '00000000'  // Transparent fill
+  }), {}, name + ' HUC-2 Boundary');
+}
+
+addHUC2Layer(westernHUC2, 'Western');
+addHUC2Layer(easternHUC2, 'Eastern');
+addHUC2Layer(midwesternHUC2, 'Midwestern');
+addHUC2Layer(southeasternHUC2, 'Southeastern');
+addHUC2Layer(northeasternHUC2, 'Northeastern');
+addHUC2Layer(texasGulfHUC2, 'Texas-Gulf');
+addHUC2Layer(ohioHUC2, 'Ohio');
+addHUC2Layer(greatBasinHUC2, 'Great Basin');
+addHUC2Layer(arkansasWhiteRedHUC2, 'Arkansas-White-Red');
+addHUC2Layer(greatLakesHUC2, 'Great Lakes');
+addHUC2Layer(pacificNorthwestHUC2, 'Pacific Northwest');
+addHUC2Layer(lowerMississippiHUC2, 'Lower Mississippi');
+addHUC2Layer(sourisRedRainyHUC2, 'Souris-Red-Rainy');
+addHUC2Layer(upperColoradoHUC2, 'Upper Colorado');
+addHUC2Layer(lowerColoradoHUC2, 'Lower Colorado');
+addHUC2Layer(carolinasHUC2, 'Carolinas');
+
+// Function to create animations for each region
+function createAnimation(collection, region, name) {
+  return ui.Thumbnail({
+    image: collection,
+    params: {
+      region: region.geometry().bounds(),
+      dimensions: 256,
+      framesPerSecond: 1,
+      crs: 'EPSG:4326'
+    },
+    style: {margin: '0 8px'}
+  });
+}
+
+// Create animations for each region
+var westernAnimation = createAnimation(westernPDSICollection, westernHUC2, 'Western');
+var easternAnimation = createAnimation(easternPDSICollection, easternHUC2, 'Eastern');
+var midwesternAnimation = createAnimation(midwesternPDSICollection, midwesternHUC2, 'Midwestern');
+var southeasternAnimation = createAnimation(southeasternPDSICollection, southeasternHUC2, 'Southeastern');
+var northeasternAnimation = createAnimation(northeasternPDSICollection, northeasternHUC2, 'Northeastern');
+var texasGulfAnimation = createAnimation(texasGulfPDSICollection, texasGulfHUC2, 'Texas-Gulf');
+var ohioAnimation = createAnimation(ohioPDSICollection, ohioHUC2, 'Ohio');
+var greatBasinAnimation = createAnimation(greatBasinPDSICollection, greatBasinHUC2, 'Great Basin');
+var arkansasWhiteRedAnimation = createAnimation(arkansasWhiteRedPDSICollection, arkansasWhiteRedHUC2, 'Arkansas-White-Red');
+var greatLakesAnimation = createAnimation(greatLakesPDSICollection, greatLakesHUC2, 'Great Lakes');
+var pacificNorthwestAnimation = createAnimation(pacificNorthwestPDSICollection, pacificNorthwestHUC2, 'Pacific Northwest');
+var lowerMississippiAnimation = createAnimation(lowerMississippiPDSICollection, lowerMississippiHUC2, 'Lower Mississippi');
+var sourisRedRainyAnimation = createAnimation(sourisRedRainyPDSICollection, sourisRedRainyHUC2, 'Souris-Red-Rainy');
+var upperColoradoAnimation = createAnimation(upperColoradoPDSICollection, upperColoradoHUC2, 'Upper Colorado');
+var lowerColoradoAnimation = createAnimation(lowerColoradoPDSICollection, lowerColoradoHUC2, 'Lower Colorado');
+var carolinasAnimation = createAnimation(carolinasPDSICollection, carolinasHUC2, 'Carolinas');
+
+// Add the animations to the map
+var animationPanel = ui.Panel({
+  widgets: [westernAnimation, easternAnimation, midwesternAnimation, southeasternAnimation, northeasternAnimation,
+            texasGulfAnimation, ohioAnimation, greatBasinAnimation, arkansasWhiteRedAnimation, greatLakesAnimation,
+            pacificNorthwestAnimation, lowerMississippiAnimation, sourisRedRainyAnimation, upperColoradoAnimation,
+            lowerColoradoAnimation, carolinasAnimation],
+  layout: ui.Panel.Layout.flow('horizontal'),
+  style: {position: 'bottom-right'}
+});
+
+Map.add(animationPanel);
+
+// Function to calculate time series for each region
+function calculateTimeSeries(region) {
+  return years.map(function(year) {
+    var pdsiValue = calculatePDSIForHUC2(region, year).reduceRegion({
+      reducer: ee.Reducer.mean(),
+      geometry: region.geometry(),
+      scale: 10000,
+      maxPixels: 1e12
+    }).get('pdsi');
+    return ee.Feature(null, {year: year, pdsi: pdsiValue});
+  });
+}
+
+// Calculate time series for each region
+var westernPDSITimeSeries = calculateTimeSeries(westernHUC2);
+var easternPDSITimeSeries = calculateTimeSeries(easternHUC2);
+var midwesternPDSITimeSeries = calculateTimeSeries(midwesternHUC2);
+var southeasternPDSITimeSeries = calculateTimeSeries(southeasternHUC2);
+var northeasternPDSITimeSeries = calculateTimeSeries(northeasternHUC2);
+var texasGulfPDSITimeSeries = calculateTimeSeries(texasGulfHUC2);
+var ohioPDSITimeSeries = calculateTimeSeries(ohioHUC2);
+var greatBasinPDSITimeSeries = calculateTimeSeries(greatBasinHUC2);
+var arkansasWhiteRedPDSITimeSeries = calculateTimeSeries(arkansasWhiteRedHUC2);
+var greatLakesPDSITimeSeries = calculateTimeSeries(greatLakesHUC2);
+var pacificNorthwestPDSITimeSeries = calculateTimeSeries(pacificNorthwestHUC2);
+var lowerMississippiPDSITimeSeries = calculateTimeSeries(lowerMississippiHUC2);
+var sourisRedRainyPDSITimeSeries = calculateTimeSeries(sourisRedRainyHUC2);
+var upperColoradoPDSITimeSeries = calculateTimeSeries(upperColoradoHUC2);
+var lowerColoradoPDSITimeSeries = calculateTimeSeries(lowerColoradoHUC2);
+var carolinasPDSITimeSeries = calculateTimeSeries(carolinasHUC2);
+
+// Function to create time series charts for each region
+function createTimeSeriesChart(timeSeriesCollection, name, color) {
+  return ui.Chart.feature.byFeature(timeSeriesCollection, 'year', 'pdsi')
+    .setChartType('LineChart')
+    .setOptions({
+      title: 'PDSI Time Series for ' + name + ' HUC-2 Region',
+      hAxis: {title: 'Year'},
+      vAxis: {title: 'PDSI'},
+      lineWidth: 2,
+      pointSize: 5,
+      series: {
+        0: {color: color}
+      }
+    });
+}
+
+// Convert the time series into FeatureCollections for charting
+var westernPDSITimeSeriesCollection = ee.FeatureCollection(westernPDSITimeSeries);
+var easternPDSITimeSeriesCollection = ee.FeatureCollection(easternPDSITimeSeries);
+var midwesternPDSITimeSeriesCollection = ee.FeatureCollection(midwesternPDSITimeSeries);
+var southeasternPDSITimeSeriesCollection = ee.FeatureCollection(southeasternPDSITimeSeries);
+var northeasternPDSITimeSeriesCollection = ee.FeatureCollection(northeasternPDSITimeSeries);
+var texasGulfPDSITimeSeriesCollection = ee.FeatureCollection(texasGulfPDSITimeSeries);
+var ohioPDSITimeSeriesCollection = ee.FeatureCollection(ohioPDSITimeSeries);
+var greatBasinPDSITimeSeriesCollection = ee.FeatureCollection(greatBasinPDSITimeSeries);
+var arkansasWhiteRedPDSITimeSeriesCollection = ee.FeatureCollection(arkansasWhiteRedPDSITimeSeries);
+var greatLakesPDSITimeSeriesCollection = ee.FeatureCollection(greatLakesPDSITimeSeries);
+var pacificNorthwestPDSITimeSeriesCollection = ee.FeatureCollection(pacificNorthwestPDSITimeSeries);
+var lowerMississippiPDSITimeSeriesCollection = ee.FeatureCollection(lowerMississippiPDSITimeSeries);
+var sourisRedRainyPDSITimeSeriesCollection = ee.FeatureCollection(sourisRedRainyPDSITimeSeries);
+var upperColoradoPDSITimeSeriesCollection = ee.FeatureCollection(upperColoradoPDSITimeSeries);
+var lowerColoradoPDSITimeSeriesCollection = ee.FeatureCollection(lowerColoradoPDSITimeSeries);
+var carolinasPDSITimeSeriesCollection = ee.FeatureCollection(carolinasPDSITimeSeries);
+
+// Display the time series charts
+var westernChart = createTimeSeriesChart(westernPDSITimeSeriesCollection, 'Western', 'FF0000');
+var easternChart = createTimeSeriesChart(easternPDSITimeSeriesCollection, 'Eastern', '0000FF');
+var midwesternChart = createTimeSeriesChart(midwesternPDSITimeSeriesCollection, 'Midwestern', '008000');
+var southeasternChart = createTimeSeriesChart(southeasternPDSITimeSeriesCollection, 'Southeastern', 'FFA500');
+var northeasternChart = createTimeSeriesChart(northeasternPDSITimeSeriesCollection, 'Northeastern', '800080');
+var texasGulfChart = createTimeSeriesChart(texasGulfPDSITimeSeriesCollection, 'Texas-Gulf', 'FF6347');
+var ohioChart = createTimeSeriesChart(ohioPDSITimeSeriesCollection, 'Ohio', '4682B4');
+var greatBasinChart = createTimeSeriesChart(greatBasinPDSITimeSeriesCollection, 'Great Basin', '2E8B57');
+var arkansasWhiteRedChart = createTimeSeriesChart(arkansasWhiteRedPDSITimeSeriesCollection, 'Arkansas-White-Red', 'FF4500');
+var greatLakesChart = createTimeSeriesChart(greatLakesPDSITimeSeriesCollection, 'Great Lakes', '1E90FF');
+var pacificNorthwestChart = createTimeSeriesChart(pacificNorthwestPDSITimeSeriesCollection, 'Pacific Northwest', 'FF69B4');
+var lowerMississippiChart = createTimeSeriesChart(lowerMississippiPDSITimeSeriesCollection, 'Lower Mississippi', 'FFD700');
+var sourisRedRainyChart = createTimeSeriesChart(sourisRedRainyPDSITimeSeriesCollection, 'Souris-Red-Rainy', '8B4513');
+var upperColoradoChart = createTimeSeriesChart(upperColoradoPDSITimeSeriesCollection, 'Upper Colorado', '7B68EE');
+var lowerColoradoChart = createTimeSeriesChart(lowerColoradoPDSITimeSeriesCollection, 'Lower Colorado', 'CD5C5C');
+var carolinasChart = createTimeSeriesChart(carolinasPDSITimeSeriesCollection, 'Carolinas', 'FF8C00');
+
+// Print the charts
+print(westernChart);
+print(easternChart);
+print(midwesternChart);
+print(southeasternChart);
+print(northeasternChart);
+print(texasGulfChart);
+print(ohioChart);
+print(greatBasinChart);
+print(arkansasWhiteRedChart);
+print(greatLakesChart);
+print(pacificNorthwestChart);
+print(lowerMississippiChart);
+print(sourisRedRainyChart);
+print(upperColoradoChart);
+print(lowerColoradoChart);
+print(carolinasChart);
