@@ -1,0 +1,22 @@
+// Define the geometry for the mainland United States
+var mainlandUS = ee.Geometry.Rectangle([-125, 24, -66, 50]);
+
+// Load HUC-6 boundaries
+var huc6 = ee.FeatureCollection("USGS/WBD/2017/HUC06")
+  .filterBounds(mainlandUS);
+
+// Define visualization parameters
+var huc6VisParams = {
+  color: 'blue',
+  width: 1,
+  opacity: 0.7
+};
+
+// Add the HUC-6 boundaries to the map
+Map.addLayer(huc6, huc6VisParams, 'HUC-6 Boundaries');
+
+// Center the map on the mainland United States
+Map.centerObject(mainlandUS, 4);
+
+// Print the HUC-6 feature collection to the console
+print('HUC-6 Boundaries:', huc6);
