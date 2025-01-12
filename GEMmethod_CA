@@ -1,0 +1,98 @@
+// Load HUC-2 boundaries 
+var huc2 = ee.FeatureCollection("USGS/WBD/2017/HUC02");
+
+// Define the California HUC2 region using HUC2 code '18'
+var californiaHUC2 = huc2.filter(ee.Filter.eq('huc2', '18')).geometry();
+
+// Simplify the region geometry to reduce computation load
+var simplifiedCaliforniaHUC2 = californiaHUC2.simplify(500);
+
+// Define the date ranges for wet and dry periods
+var wetStartDate = '2021-11-01';
+var wetEndDate = '2022-04-30';
+var dryStartDate = '2021-05-01';
+var dryEndDate = '2021-10-31';
+
+// Load the NLCD dataset to mask out urban areas, water, farmlands, and pastures
+var nlcd = ee.Image('USGS/NLCD_RELEASES/2019_REL/NLCD/2019');
+var exclusionMask = nlcd.select('landcover').eq(21)  // Urban areas
+  .or(nlcd.select('landcover').eq(22))
+  .or(nlcd.select('landcover').eq(23))
+  .or(nlcd.select('landcover').eq(24))
+  .or(nlcd.select('landcover').eq(11))  // Water bodies
+  .or(nlcd.select('landcover').eq(81))  // Pasture/Hay
+  .or(nlcd.select('landcover').eq(82)); // Cultivated Crops
+
+// Cloud masking and scaling
+function maskL8sr(image) {
+  var qaMask = image.select('QA_PIXEL').bitwiseAnd(31).eq(0);
+  var saturationMask = image.select('QA_RADSAT').eq(0);
+  
+  var opticalBands = image.select('SR_B.').multiply(0.0000275).add(-0.2);
+  return image.addBands(opticalBands, null, true)
+    .updateMask(qaMask)
+    .updateMask(saturationMask)
+    .updateMask(exclusionMask.not());
+}
+
+// Function to compute NDVI
+function computeNDVI(image) {
+  return image.normalizedDifference(['SR_B5', 'SR_B4']).rename('NDVI');
+}
+
+// Function to compute NDWI
+function computeNDWI(image) {
+  return image.normalizedDifference(['SR_B3', 'SR_B5']).rename('NDWI');
+}
+
+// Step 1: Initial KMeans clustering with sampling
+function initialClustering(regionGeom, startDate, endDate, numClusters) {
+  var landsatCollection = ee.ImageCollection("LANDSAT/LC08/C02/T1_L2")
+    .filterBounds(regionGeom)
+    .filterDate(startDate, endDate)
+    .filter(ee.Filter.lt('CLOUD_COVER', 10))
+    .map(maskL8sr);
+
+  // Compute mean NDVI and NDWI
+  var meanNDVI = landsatCollection.map(computeNDVI).mean().rename('Mean_NDVI');
+  var meanNDWI = landsatCollection.map(computeNDWI).mean().rename('Mean_NDWI');
+  
+  // Combine NDVI and NDWI into one image
+  var combined = meanNDVI.addBands(meanNDWI).clip(regionGeom);
+
+  // Sample the image to get training data for clustering
+  var trainingData = combined.sample({
+    region: regionGeom,
+    scale: 30,
+    numPixels: 5000,  // Adjust this value as needed
+    geometries: true
+  });
+
+  // Perform initial KMeans clustering
+  var kmeansClusterer = ee.Clusterer.wekaKMeans(numClusters).train(trainingData);
+  var clustered = combined.cluster(kmeansClusterer);  // Use .cluster(), not .classify()
+  
+  // Add layers to the map
+  Map.addLayer(combined, {bands: ['Mean_NDVI'], min: -1, max: 1}, 'Mean NDVI');
+  Map.addLayer(clustered, {min: 0, max: numClusters - 1, palette: ['blue', 'green', 'yellow', 'red']}, 'Clustered Image');
+  
+  return clustered;
+}
+
+// Run KMeans for the wet period
+var numClusters = 10;  // Number of clusters
+var wetClassified = initialClustering(simplifiedCaliforniaHUC2, wetStartDate, wetEndDate, numClusters);
+
+// Export the classified image as TIFF
+Export.image.toDrive({
+  image: wetClassified,
+  description: 'KMeans_Classification_Wet_Period_2021',
+  scale: 30,
+  region: simplifiedCaliforniaHUC2,
+  fileFormat: 'GeoTIFF',
+  crs: 'EPSG:4326',
+  maxPixels: 1e13
+});
+
+// Center the map on the region
+Map.centerObject(simplifiedCaliforniaHUC2, 6);
