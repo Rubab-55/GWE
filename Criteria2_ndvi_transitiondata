@@ -1,0 +1,132 @@
+// Load the GRIDMET Drought: CONUS Drought Indices dataset
+var droughtData = ee.ImageCollection('GRIDMET/DROUGHT');
+
+// Define the HUC-2 region for Texas-Gulf HUC-2
+var texasGulfHUC2 = ee.FeatureCollection("USGS/WBD/2017/HUC02")
+  .filter(ee.Filter.eq('huc2', '12'))
+  .map(function(feature) {
+    return feature.simplify(1000);  // Simplify the geometry to reduce complexity
+  });
+
+// Load the SRTM Digital Elevation Data
+var srtm = ee.Image('USGS/SRTMGL1_003');
+
+// Define a land mask: elevation > 0
+var landMask = srtm.gt(0);
+
+// Function to compute NDVI using Landsat 8 Collection 2
+function computeNDVI(image) {
+  var ndvi = image.normalizedDifference(['SR_B5', 'SR_B4']).rename('NDVI');
+  return ndvi;
+}
+
+// Define the date range for the dry season in the Texas-Gulf region
+var dryStartDate = '2022-07-01';
+var dryEndDate = '2022-08-30';
+
+// Load Landsat 8 Collection 2 surface reflectance data for the dry season
+var landsat8Collection = ee.ImageCollection('LANDSAT/LC08/C02/T1_L2')
+  .filterDate(dryStartDate, dryEndDate)
+  .filter(ee.Filter.lt('CLOUD_COVER', 20))
+  .map(function(image) {
+    // Apply scaling factors to Landsat Collection 2 data
+    return image
+      .select(['SR_B5', 'SR_B4'])
+      .multiply(0.0000275)
+      .add(-0.2)
+      .copyProperties(image, ['system:time_start']);
+  })
+  .map(computeNDVI);
+
+// Compute the median NDVI for the dry season
+var medianNDVI = landsat8Collection.median().select('NDVI');
+
+// Clip the NDVI image to the simplified Texas-Gulf HUC-2 boundaries
+var clippedNDVITexasGulf = medianNDVI.clipToCollection(texasGulfHUC2);
+
+// Sample points for clustering (reduced number of points)
+var training = clippedNDVITexasGulf.sample({
+  region: texasGulfHUC2.geometry(),
+  scale: 30,  // Scale for sampling
+  numPixels: 1000,  // Reduced number of sample points
+  geometries: true
+});
+
+// Apply k-means clustering with 5 clusters (from low to high NDVI)
+var clusterer = ee.Clusterer.wekaKMeans(5).train(training);
+var clustered = clippedNDVITexasGulf.cluster(clusterer);
+
+// Define visualization parameters for clustering
+var clusterVisParams = {
+  min: 0,
+  max: 4,
+  palette: ['#FF0000', '#FFA500', '#FFFF00', '#00FF00', '#008000']  // From low to high NDVI
+};
+
+// Add the clustered NDVI layer to the map
+Map.addLayer(clustered.visualize(clusterVisParams), {}, 'Clustered NDVI Texas-Gulf HUC-2');
+
+// Add the NDVI layer for the Texas-Gulf HUC-2 region to the map
+var ndviParams = {
+  min: -1,
+  max: 1,
+  palette: ['#000080', '#0000FF', '#00FFFF', '#00FF00', '#FFFF00', '#FF0000', '#800000']
+};
+Map.addLayer(clippedNDVITexasGulf.visualize(ndviParams), {}, 'NDVI Texas-Gulf HUC-2');
+
+// Center the map on the Texas-Gulf HUC-2 region
+Map.centerObject(texasGulfHUC2, 7);
+
+// Add the HUC-2 boundaries to the map as a FeatureCollection
+Map.addLayer(texasGulfHUC2.style({color: '000000', width: 2, fillColor: '00000000'}), {}, 'Texas-Gulf HUC-2 Boundary');
+
+// Create a legend for the clustering
+var legend = ui.Panel({
+  style: {
+    position: 'bottom-right',
+    padding: '8px 15px'
+  }
+});
+
+var legendTitle = ui.Label({
+  value: 'NDVI Clusters',
+  style: {
+    fontWeight: 'bold',
+    fontSize: '14px',
+    margin: '0 0 6px 0',
+    padding: '0'
+  }
+});
+
+legend.add(legendTitle);
+
+// Colors and labels for the clusters
+var clusterColors = ['#FF0000', '#FFA500', '#FFFF00', '#00FF00', '#008000'];
+var clusterLabels = ['Very Low NDVI', 'Low NDVI', 'Moderate NDVI', 'High NDVI', 'Very High NDVI'];
+
+// Add color boxes and labels to the legend
+for (var i = 0; i < clusterColors.length; i++) {
+  var colorBox = ui.Label({
+    style: {
+      backgroundColor: clusterColors[i],
+      padding: '8px',
+      margin: '0 0 4px 0'
+    }
+  });
+
+  var description = ui.Label({
+    value: clusterLabels[i],
+    style: {margin: '0 0 4px 6px'}
+  });
+
+  legend.add(ui.Panel({
+    widgets: [colorBox, description],
+    layout: ui.Panel.Layout.Flow('horizontal')
+  }));
+}
+
+// Add the legend to the map
+Map.add(legend);
+
+// Print the clustered image to the console for verification
+print('Clustered NDVI Texas-Gulf HUC-2:', clustered);
