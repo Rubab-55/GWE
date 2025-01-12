@@ -1,0 +1,106 @@
+// Load the GRIDMET Drought: CONUS Drought Indices dataset
+var droughtData = ee.ImageCollection('GRIDMET/DROUGHT');
+
+// Define the HUC-2 region for the Missouri River Basin (Midwest)
+var midwestHUC2 = ee.FeatureCollection("USGS/WBD/2017/HUC02")
+  .filter(ee.Filter.eq('huc2', '10'))  // HUC-2 code for Missouri River Basin
+  .map(function(feature) {
+    return feature.simplify(1000);  // Simplify the geometry to reduce complexity
+  });
+
+// Load the SRTM 30m Digital Elevation Data
+var srtm = ee.Image('USGS/SRTMGL1_003');
+
+// Clip the DEM to the Missouri River Basin HUC-2 boundaries
+var clippedDEM = srtm.clipToCollection(midwestHUC2);
+
+// Define visualization parameters for the DEM
+var demVisParams = {
+  min: 0,
+  max: 4000,
+  palette: ['000000', '0000FF', '00FFFF', '00FF00', 'FFFF00', 'FF8000', 'FF0000', 'FFFFFF']
+};
+
+// Add the DEM layer to the map with the improved color scheme
+Map.addLayer(clippedDEM, demVisParams, '30m DEM Missouri River Basin HUC-2');
+
+// Center the map on the Missouri River Basin HUC-2 region
+Map.centerObject(midwestHUC2, 7);
+
+// Add the HUC-2 boundaries to the map as a FeatureCollection
+Map.addLayer(midwestHUC2.style({color: '000000', width: 2, fillColor: '00000000'}), {}, 'Missouri River Basin HUC-2 Boundary');
+
+// Function to compute NDVI
+function computeNDVI(image) {
+  var ndvi = image.normalizedDifference(['B8', 'B4']).rename('NDVI');
+  return ndvi;
+}
+
+// Define the date range for the dry season in the region
+var dryStartDate = '2021-05-01';
+var dryEndDate = '2021-06-30';
+
+// Load Sentinel-2 surface reflectance data for the dry season
+var sentinel2Collection = ee.ImageCollection('COPERNICUS/S2_SR')
+  .filterDate(dryStartDate, dryEndDate)
+  .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 20))
+  .map(computeNDVI);
+
+// Compute the median NDVI for the dry season
+var medianNDVI = sentinel2Collection.median().select('NDVI');
+
+// Clip the NDVI image to the simplified HUC-2 boundaries
+var clippedNDVIMissouri = medianNDVI.clipToCollection(midwestHUC2);
+
+// Load the NLCD dataset (2019 version)
+var nlcd = ee.Image('USGS/NLCD_RELEASES/2019_REL/NLCD/2019');
+
+// Create a mask to exclude urban, water, farmlands, and pastures
+var exclusionMask = nlcd.select('landcover').neq(21)  // Exclude Developed, Open Space
+  .and(nlcd.select('landcover').neq(22))  // Exclude Developed, Low Intensity
+  .and(nlcd.select('landcover').neq(23))  // Exclude Developed, Medium Intensity
+  .and(nlcd.select('landcover').neq(24))  // Exclude Developed, High Intensity
+  .and(nlcd.select('landcover').neq(11))  // Exclude Open Water
+  .and(nlcd.select('landcover').neq(81))  // Exclude Pasture/Hay
+  .and(nlcd.select('landcover').neq(82)); // Exclude Cultivated Crops
+
+// Apply the exclusion mask to the NDVI image
+var maskedNDVIMissouri = clippedNDVIMissouri.updateMask(exclusionMask);
+
+// Sample points for clustering
+var training = maskedNDVIMissouri.sample({
+  region: midwestHUC2.geometry(),
+  scale: 30,  // Keep scale at 30m for the desired spatial resolution
+  numPixels: 1000,  // Sample points for clustering
+  geometries: true
+});
+
+// Apply k-means clustering with 5 clusters (from low to high NDVI)
+var clusterer = ee.Clusterer.wekaKMeans(5).train(training);
+var clustered = maskedNDVIMissouri.cluster(clusterer);
+
+// Remap cluster values from 0-4 to 1-5
+var rankedClusters = clustered.remap([0, 1, 2, 3, 4], [1, 2, 3, 4, 5]);
+
+// Define visualization parameters for clustering
+var clusterVisParams = {
+  min: 1,
+  max: 5,
+  palette: ['FF0000', 'FFA500', 'FFFF00', '00FF00', '008000']  // From low to high NDVI
+};
+
+// Add the ranked clustered NDVI layer to the map
+Map.addLayer(rankedClusters.visualize(clusterVisParams), {}, 'Clustered NDVI Missouri River Basin HUC-2');
+
+// Export the ranked clustered image as GeoTIFF
+Export.image.toDrive({
+  image: rankedClusters,
+  description: 'Ranked_Clusters_NDVI_Missouri_River_Basin_HUC2_2021_Masked',
+  folder: 'EarthEngineExports',  // Optional: specify folder name in your Google Drive
+  fileNamePrefix: 'Ranked_Clusters_NDVI_Missouri_River_Basin_HUC2_2021_Masked',  // Name of the exported file
+  scale: 30,  // Spatial resolution of 30 meters
+  region: midwestHUC2.geometry(),  // Export region
+  maxPixels: 1e10,  // Maximum number of pixels
+  crs: 'EPSG:4326',  // Coordinate reference system
+  fileFormat: 'GeoTIFF'  // Export as GeoTIFF
+});
