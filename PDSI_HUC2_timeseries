@@ -1,0 +1,135 @@
+// Load the GRIDMET Drought: CONUS Drought Indices dataset
+var droughtData = ee.ImageCollection('GRIDMET/DROUGHT');
+
+// Define a geometry for the mainland United States
+var mainlandUS = ee.Geometry.Rectangle([-125, 24, -66.5, 49.5]);
+
+// Load HUC-2 boundaries
+var huc2 = ee.FeatureCollection("USGS/WBD/2017/HUC02");
+
+// Simplify the HUC-2 boundaries to reduce complexity (optional)
+var simplifiedHUC2 = huc2.map(function(feature) {
+  return feature.simplify(1000);  // Adjust tolerance as needed
+});
+
+// Define years and colors for each year
+var years = [2015, 2016, 2017, 2018, 2019, 2020, 2021, 2022, 2023];
+var colors = ['FF0000', 'FFA500', 'FFFF00', '00FF00', '00FFFF', '0000FF', '800080', 'FFC0CB', 'A52A2A'];
+
+// Function to calculate the annual average PDSI
+function calculatePDSI(year) {
+  var startDate = ee.Date.fromYMD(year, 1, 1);
+  var endDate = ee.Date.fromYMD(year, 12, 31);
+  var annualDroughtData = droughtData.filterDate(startDate, endDate).filterBounds(mainlandUS);
+  var annualPDSI = annualDroughtData.select('pdsi').mean();
+  return annualPDSI.set('year', year).set('system:time_start', ee.Date.fromYMD(year, 1, 1).millis());
+}
+
+// Calculate PDSI for each year and assign a unique color
+var pdsiCollection = ee.ImageCollection(years.map(function(year, index) {
+  var image = calculatePDSI(year);
+  return image.visualize({
+    min: -10,
+    max: 10,
+    palette: ['FF0000', 'FFA500', 'FFFF00', '00FF00', '00FFFF', '0000FF', '800080']
+  }).set('year', year);
+}));
+
+// Function to add year text to an image
+function addYearText(image) {
+  var year = ee.Number(image.get('year')).format();
+  var text = ee.Image().paint({
+    featureCollection: ee.FeatureCollection([
+      ee.Feature(null, {text: year})
+    ]),
+    color: 1,
+    width: 1
+  }).visualize({
+    palette: ['000000'],
+    opacity: 0.8
+  });
+  return ee.ImageCollection([image, text]).mosaic();
+}
+
+// Apply the function to add year text to each image in the collection
+var annotatedPDSICollection = pdsiCollection.map(addYearText);
+
+// Center the map over the mainland United States
+Map.setCenter(-98.583, 39.833, 4);
+
+// Create a legend for the year colors
+var legendPanel = ui.Panel({
+  style: {
+    padding: '8px 15px'
+  }
+});
+
+var legendTitle = ui.Label({
+  value: 'Year Legend',
+  style: {fontWeight: 'bold', fontSize: '16px', margin: '0 0 4px 0', padding: '0'}
+});
+
+legendPanel.add(legendTitle);
+
+years.forEach(function(year, index) {
+  var colorBox = ui.Label({
+    style: {
+      backgroundColor: '#' + colors[index],
+      padding: '8px',
+      margin: '0 0 4px 0'
+    }
+  });
+  var description = ui.Label({
+    value: year.toString(),
+    style: {margin: '0 0 4px 6px'}
+  });
+  legendPanel.add(ui.Panel([colorBox, description], ui.Panel.Layout.flow('horizontal')));
+});
+
+// Create the animation using ui.Thumbnail
+var animationParams = {
+  region: mainlandUS,
+  dimensions: 512,
+  framesPerSecond: 1,
+  crs: 'EPSG:4326'
+};
+
+var animation = ui.Thumbnail({
+  image: annotatedPDSICollection,
+  params: animationParams,
+  style: {margin: '0 8px'}
+});
+
+// Create a panel to hold the animation and legend
+var animationAndLegendPanel = ui.Panel({
+  widgets: [animation, legendPanel],
+  layout: ui.Panel.Layout.flow('horizontal'),
+  style: {position: 'bottom-right'}
+});
+
+Map.add(animationAndLegendPanel);
+
+// Function to add layers to the map with the basemap
+function addLayerWithBasemap(image, year) {
+  Map.addLayer(image, {}, 'PDSI ' + year);
+}
+
+// Add each year's PDSI as a layer with the basemap
+years.forEach(function(year, index) {
+  var image = calculatePDSI(year).visualize({
+    min: -10,
+    max: 10,
+    palette: ['FF0000', 'FFA500', 'FFFF00', '00FF00', '00FFFF', '0000FF', '800080']
+  });
+  addLayerWithBasemap(image, year);
+});
+
+// Style parameters for HUC-2 boundaries
+var huc2Style = {
+  color: 'black',       // Boundary color
+  fillColor: '00000000', // Transparent fill
+  width: 1.5            // Boundary width
+};
+
+// Add the HUC-2 boundaries layer on top of the PDSI layers
+Map.addLayer(simplifiedHUC2.style(huc2Style), {}, 'HUC-2 Boundaries');
