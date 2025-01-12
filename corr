@@ -1,0 +1,107 @@
+// Define the geometry for the Southwest United States
+var southwestUS = ee.Geometry.Rectangle([-125, 31, -102, 37]);
+
+// Define the date range for the trend analysis
+var startDate = '2015-01-01';
+var endDate = '2021-12-31';
+
+// Define the date range for the dry season
+var dryStartDate = '2021-03-01';
+var dryEndDate = '2021-05-31';
+
+// Load the Landsat 8 Collection 2 Level 2 dataset and filter by date and cloud cover
+var landsat = ee.ImageCollection('LANDSAT/LC08/C02/T1_L2')
+  .filterBounds(southwestUS)
+  .filter(ee.Filter.lt('CLOUD_COVER', 5))
+  .map(function(image) {
+    var qaMask = image.select('QA_PIXEL').bitwiseAnd(parseInt('11111', 2)).eq(0);
+    var saturationMask = image.select('QA_RADSAT').eq(0);
+    var opticalBands = image.select('SR_B.').multiply(0.0000275).add(-0.2);
+    return image.addBands(opticalBands, null, true)
+      .updateMask(qaMask)
+      .updateMask(saturationMask);
+  })
+  .map(function(image) {
+    var ndvi = image.normalizedDifference(['SR_B5', 'SR_B4']).rename('NDVI');
+    return image.addBands(ndvi);
+  });
+
+// Function to create a time band for trend analysis
+function createTimeBand(image) {
+  var date = ee.Date(image.get('system:time_start'));
+  var years = date.difference(ee.Date(startDate), 'year');
+  return image.addBands(ee.Image(years).rename('year').float());
+}
+
+// Add a time band to the image collection
+var landsatWithTime = landsat.map(createTimeBand);
+
+// Function to filter the image collection by the dry season
+function filterDrySeason(collection) {
+  return collection.filter(ee.Filter.calendarRange(3, 5, 'month'));
+}
+
+// Calculate the linear trend (slope) of NDVI over the entire year
+var trendYear = landsatWithTime.filterDate(startDate, endDate).select(['year', 'NDVI']).reduce(ee.Reducer.linearFit());
+var ndviTrendYear = trendYear.select('scale').rename('NDVI_Trend_Year');
+
+// Calculate the linear trend (slope) of NDVI over the dry season
+var trendDry = filterDrySeason(landsatWithTime.filterDate(startDate, endDate)).select(['year', 'NDVI']).reduce(ee.Reducer.linearFit());
+var ndviTrendDry = trendDry.select('scale').rename('NDVI_Trend_Dry');
+
+// Visualization Parameters for NDVI Trend
+var trendParams = {
+  min: -0.05,
+  max: 0.05,
+  palette: ['red', 'white', 'green']
+};
+
+// Function to create a color bar
+var createColorBar = function(palette, min, max, title) {
+  var colorBar = ui.Panel({
+    widgets: [
+      ui.Label(min.toFixed(2)),
+      ui.Thumbnail({
+        image: ee.Image.pixelLonLat().select(0).multiply(0).add(ee.Image.pixelLonLat().select(0)),
+        params: {
+          bbox: [0, 0, 1, 0.1],
+          dimensions: '100x10',
+          format: 'png',
+          min: 0,
+          max: 1,
+          palette: palette,
+        },
+        style: {stretch: 'horizontal', margin: '0 8px'},
+      }),
+      ui.Label(max.toFixed(2))
+    ],
+    layout: ui.Panel.Layout.flow('horizontal')
+  });
+  
+  var legendTitle = ui.Label({
+    value: title,
+    style: {fontWeight: 'bold', fontSize: '12px', margin: '4px 8px'}
+  });
+
+  var legendPanel = ui.Panel({
+    widgets: [legendTitle, colorBar],
+    style: {position: 'bottom-right', padding: '8px 15px'}
+  });
+  
+  return legendPanel;
+};
+
+// Add the NDVI trend layers and their color bars to the map
+Map.centerObject(southwestUS, 6);
+Map.addLayer(ndviTrendYear, trendParams, 'NDVI Trend (Year)');
+Map.addLayer(ndviTrendDry, trendParams, 'NDVI Trend (Dry Season)');
+
+var trendColorBarYear = createColorBar(trendParams.palette, -0.05, 0.05, 'NDVI Trend (Year)');
+var trendColorBarDry = createColorBar(trendParams.palette, -0.05, 0.05, 'NDVI Trend (Dry Season)');
+
+Map.add(trendColorBarYear);
+Map.add(trendColorBarDry);
+
+// Print results to console
+print('NDVI Trend (Year):', ndviTrendYear);
+print('NDVI Trend (Dry Season):', ndviTrendDry);
