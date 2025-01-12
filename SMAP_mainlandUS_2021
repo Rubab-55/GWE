@@ -1,0 +1,73 @@
+// Define the geometry for the mainland United States
+var mainlandUS = ee.Geometry.Rectangle([-125, 24, -66, 49]);
+
+// Define the date range for the year 2021
+var startDate = '2021-01-01';
+var endDate = '2021-12-31';
+
+// Load the SMAP dataset and filter by date and region
+var smap = ee.ImageCollection('NASA_USDA/HSL/SMAP10KM_soil_moisture')
+  .filterBounds(mainlandUS)
+  .filterDate(startDate, endDate);
+
+// Print SMAP collection to ensure data is loaded
+print('SMAP Collection:', smap);
+
+// Calculate the mean soil moisture for the year 2021
+var meanSoilMoisture = smap.select('ssm').mean().rename('Mean_Soil_Moisture');
+
+// Print mean soil moisture image to ensure it's computed correctly
+print('Mean Soil Moisture Image:', meanSoilMoisture);
+
+// Define visualization parameters
+var soilMoistureParams = {
+  min: 0,
+  max: 0.5,
+  palette: ['blue', 'cyan', 'green', 'yellow', 'red']
+};
+
+// Add the mean soil moisture layer without clipping to check data visibility
+Map.centerObject(mainlandUS, 4);
+Map.addLayer(meanSoilMoisture, soilMoistureParams, 'Mean Soil Moisture 2021');
+
+// Function to create a color bar
+var createColorBar = function(palette, min, max, title) {
+  var colorBar = ui.Panel({
+    widgets: [
+      ui.Label(min.toFixed(2)),
+      ui.Thumbnail({
+        image: ee.Image.pixelLonLat().select(0).multiply((max - min) / 100).add(min).visualize({
+          min: min,
+          max: max,
+          palette: palette
+        }),
+        params: {
+          bbox: [0, 0, 1, 0.1],
+          dimensions: '100x10'
+        },
+        style: {stretch: 'horizontal', margin: '0 8px'}
+      }),
+      ui.Label(max.toFixed(2))
+    ],
+    layout: ui.Panel.Layout.flow('horizontal')
+  });
+
+  var legendTitle = ui.Label({
+    value: title,
+    style: {fontWeight: 'bold', fontSize: '12px', margin: '4px 8px'}
+  });
+
+  var legendPanel = ui.Panel({
+    widgets: [legendTitle, colorBar],
+    style: {position: 'bottom-right', padding: '8px 15px'}
+  });
+
+  return legendPanel;
+};
+
+// Add the color bar to the map
+var soilMoistureColorBar = createColorBar(soilMoistureParams.palette, soilMoistureParams.min, soilMoistureParams.max, 'Mean Soil Moisture 2021');
+Map.add(soilMoistureColorBar);
+
+// Print the mean soil moisture image to the console
+print('Mean Soil Moisture 2021:', meanSoilMoisture);
