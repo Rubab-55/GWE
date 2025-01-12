@@ -4,5 +4,5 @@ This work has been performed at two major platforms GEE API and Python; the init
 GEE Scripts
 Name Convention: ActiveProcess_HUC#_State
 The scripts have been processed for each state seperately for all the three criteria; the operation is performed for HUC6 and HUC2 
-
+AddedDataset= the dataset from criteria 1 through 3 added 
 For any questions, please reach out at rubabbashirmemon@gmail.com 
