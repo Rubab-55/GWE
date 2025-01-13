@@ -1,0 +1,28 @@
+//Simplified Geometry of CONUS
+var lsib = ee.FeatureCollection("USDOS/LSIB_SIMPLE/2017");
+var mainlandUS= lsib.filter(ee.Filter.eq('country_na','United States'))
+
+
+// Define the date range for the Landsat 8 data (summer 2018)
+var startDate = '2018-06-21';
+var endDate = '2018-09-22';
+
+function ndvi(image){
+  var ndvi_image = image.normalizedDifference(['B5','B4']).rename('NDVI')
+  return ndvi_image.copyProperties(image, image.propertyNames())
+}
+
+var landsatCollection = hls
+  .filterBounds(mainlandUS)
+  .filterDate(startDate, endDate)
+  .filter(ee.Filter.lt('CLOUD_COVERAGE', 10))
+  .map(ndvi)
+
+//Get first image
+print(landsatCollection.first())
+
+// Define NDVI visualization parameters
+var ndviParams = {min: -1, max: 1, palette: ['blue', 'white', 'green']};
+
+// Add the NDVI layer to the map
+Map.addLayer(landsatCollection.median().clip(mainlandUS), ndviParams, 'NDVI Summer 2018');
