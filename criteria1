@@ -1,0 +1,193 @@
+// Define the geometries for the regions
+var centralUS = ee.Geometry.Rectangle([-103, 36, -89, 49]);
+var texas = ee.Geometry.Rectangle([-106, 25, -93, 37]);
+var eastCoast = ee.Geometry.Rectangle([-82, 25, -66, 45]);
+var midwest = ee.Geometry.Rectangle([-104, 36, -80, 49]);
+var southwestUS = ee.Geometry.Rectangle([-125, 31, -102, 37]);
+var pacificNorthwest = ee.Geometry.Rectangle([-125, 42, -116, 49]);
+var california = ee.Geometry.Rectangle([-125, 32, -114, 42]);
+
+// Define the date ranges for the dry seasons in different regions
+var drySeasonDates = {
+  'centralUS': ['2021-06-01', '2021-08-31'],
+  'texas': ['2021-06-01', '2021-08-31'],
+  'eastCoast': ['2021-07-01', '2021-09-30'],
+  'midwest': ['2021-06-01', '2021-08-31'],
+  'southwestUS': ['2021-03-01', '2021-05-31'],
+  'pacificNorthwest': ['2021-03-01', '2021-05-31'],
+  'california': ['2021-03-01', '2021-05-31']
+};
+
+// Load the SRTM Digital Elevation Data
+var srtm = ee.Image('USGS/SRTMGL1_003');
+
+// Define a land mask: elevation > 0
+var landMask = srtm.gt(0);
+
+// Cloud masking and scaling function
+function maskL8sr(image) {
+  var qaMask = image.select('QA_PIXEL').bitwiseAnd(parseInt('11111', 2)).eq(0);
+  var saturationMask = image.select('QA_RADSAT').eq(0);
+
+  var opticalBands = image.select('SR_B.').multiply(0.0000275).add(-0.2);
+  var thermalBands = image.select('ST_B.*').multiply(0.00341802).add(149.0);
+
+  return image.updateMask(qaMask).updateMask(saturationMask)
+      .addBands(opticalBands, null, true)
+      .addBands(thermalBands, null, true);
+}
+
+// Function to compute NDVI
+function computeNDVI(image) {
+  var ndvi = image.normalizedDifference(['SR_B5', 'SR_B4']).rename('NDVI');
+  return ndvi;
+}
+
+// Function to process NDVI for a given region
+function processRegion(regionName, regionGeom, startDate, endDate) {
+  var landsatCollection = ee.ImageCollection('LANDSAT/LC08/C02/T1_L2')
+    .filterDate(startDate, endDate)
+    .filter(ee.Filter.lt('CLOUD_COVER', 5))
+    .filterBounds(regionGeom)
+    .map(maskL8sr)
+    .map(computeNDVI);
+  
+  var medianNDVI = landsatCollection.median().select('NDVI');
+  
+  var huc6 = ee.FeatureCollection("USGS/WBD/2017/HUC06").filterBounds(regionGeom);
+  var simplifiedHUC6 = huc6.map(function(feature) {
+    return feature.simplify(1000);
+  });
+  
+  var clippedNDVI = medianNDVI.clipToCollection(simplifiedHUC6);
+  var samplingRegion = simplifiedHUC6.geometry();
+  
+  var training = clippedNDVI.sample({
+    region: samplingRegion,
+    scale: 30,
+    numPixels: 500,
+    geometries: true
+  });
+  
+  var clusterer = ee.Clusterer.wekaKMeans(5).train(training);
+  var clustered = clippedNDVI.cluster(clusterer);
+  
+  var clusterMeans = ee.List.sequence(0, 4).map(function(clusterIndex) {
+    var meanNDVI = clippedNDVI.updateMask(clustered.eq(ee.Image.constant(clusterIndex))).reduceRegion({
+      reducer: ee.Reducer.mean(),
+      geometry: samplingRegion,
+      scale: 30,
+      bestEffort: true
+    }).get('NDVI');
+    return ee.Feature(null, {clusterIndex: clusterIndex, meanNDVI: meanNDVI});
+  });
+  
+  var clusterMeanFeatures = ee.FeatureCollection(clusterMeans);
+  var sortedClusterMeans = clusterMeanFeatures.sort('meanNDVI');
+  var sortedClusterIndices = sortedClusterMeans.aggregate_array('clusterIndex');
+  var clusterRanks = ee.List.sequence(1, 5);
+  var rankedClusters = clustered.remap(sortedClusterIndices, clusterRanks);
+  
+  return {
+    'clippedNDVI': clippedNDVI,
+    'rankedClusters': rankedClusters,
+    'simplifiedHUC6': simplifiedHUC6
+  };
+}
+
+// Process all regions
+var resultsCentralUS = processRegion('Central US', centralUS, drySeasonDates.centralUS[0], drySeasonDates.centralUS[1]);
+var resultsTexas = processRegion('Texas', texas, drySeasonDates.texas[0], drySeasonDates.texas[1]);
+var resultsEastCoast = processRegion('East Coast', eastCoast, drySeasonDates.eastCoast[0], drySeasonDates.eastCoast[1]);
+var resultsMidwest = processRegion('Midwest', midwest, drySeasonDates.midwest[0], drySeasonDates.midwest[1]);
+var resultsSouthwestUS = processRegion('Southwest US', southwestUS, drySeasonDates.southwestUS[0], drySeasonDates.southwestUS[1]);
+var resultsPacificNorthwest = processRegion('Pacific Northwest', pacificNorthwest, drySeasonDates.pacificNorthwest[0], drySeasonDates.pacificNorthwest[1]);
+var resultsCalifornia = processRegion('California', california, drySeasonDates.california[0], drySeasonDates.california[1]);
+
+// Define visualization parameters
+var clusterVisParams = {
+  min: 1,
+  max: 5,
+  palette: ['red', 'orange', 'yellow', 'green', 'darkgreen']
+};
+
+var ndviParams = {
+  min: -1,
+  max: 1,
+  palette: ['#000080', '#0000FF', '#00FFFF', '#00FF00', '#FFFF00', '#FF0000', '#800000']
+};
+
+var huc6VisParams = {
+  color: 'black',
+  width: 1,
+  fillColor: '00000000'
+};
+
+// Function to add layers to the map
+function addLayersToMap(regionName, results) {
+  Map.addLayer(results.simplifiedHUC6.style(huc6VisParams), {}, 'HUC-6 Boundaries ' + regionName);
+  Map.addLayer(results.clippedNDVI.visualize(ndviParams), {}, 'NDVI ' + regionName);
+  Map.addLayer(results.rankedClusters.visualize(clusterVisParams), {}, 'Ranked Clustered NDVI ' + regionName);
+}
+
+// Add layers for each region to the map
+addLayersToMap('Central US', resultsCentralUS);
+addLayersToMap('Texas', resultsTexas);
+addLayersToMap('East Coast', resultsEastCoast);
+addLayersToMap('Midwest', resultsMidwest);
+addLayersToMap('Southwest US', resultsSouthwestUS);
+addLayersToMap('Pacific Northwest', resultsPacificNorthwest);
+addLayersToMap('California', resultsCalifornia);
+
+// Center the map on the regions separately to ensure proper display
+Map.centerObject(centralUS.union(texas).union(eastCoast).union(midwest).union(southwestUS).union(pacificNorthwest).union(california), 4);
+
+// Create a legend for the ranked clustered NDVI
+var legend = ui.Panel({style: {position: 'bottom-right', padding: '8px 15px'}});
+var legendTitle = ui.Label({value: 'Ranked NDVI Clusters', style: {fontWeight: 'bold', fontSize: '12px'}});
+
+var makeRow = function(color, name) {
+  var colorBox = ui.Label({
+    style: {
+      backgroundColor: color,
+      padding: '8px',
+      margin: '0 0 4px 0'
+    }
+  });
+
+  var description = ui.Label({
+    value: name,
+    style: {margin: '0 0 4px 6px'}
+  });
+
+  return ui.Panel({
+    widgets: [colorBox, description],
+    layout: ui.Panel.Layout.Flow('horizontal')
+  });
+};
+
+var clusterColors = ['red', 'orange', 'yellow', 'green', 'darkgreen'];
+var clusterNames = ['Very Low Vegetation (Rank 1)', 'Low Vegetation (Rank 2)', 'Moderate Vegetation (Rank 3)', 'High Vegetation (Rank 4)', 'Very High Vegetation (Rank 5)'];
+
+legend.add(legendTitle);
+for (var i = 0; i < clusterColors.length; i++) {
+  legend.add(makeRow(clusterColors[i], clusterNames[i]));
+}
+
+Map.add(legend);
+
+// Print the clustered images to the console for verification
+print('Clustered NDVI Central US:', resultsCentralUS.rankedClusters);
+print('Ranked Clustered NDVI Central US:', resultsCentralUS.rankedClusters);
+print('Clustered NDVI Texas:', resultsTexas.rankedClusters);
+print('Ranked Clustered NDVI Texas:', resultsTexas.rankedClusters);
+print('Clustered NDVI East Coast:', resultsEastCoast.rankedClusters);
+print('Ranked Clustered NDVI East Coast:', resultsEastCoast.rankedClusters);
+print('Clustered NDVI Midwest:', resultsMidwest.rankedClusters);
+print('Ranked Clustered NDVI Midwest:', resultsMidwest.rankedClusters);
+print('Clustered NDVI Southwest US:', resultsSouthwestUS.rankedClusters);
+print('Ranked Clustered NDVI Southwest US:', resultsSouthwestUS.rankedClusters);
+print('Clustered NDVI Pacific Northwest:', resultsPacificNorthwest.rankedClusters);
+print('Ranked Clustered NDVI Pacific Northwest:', resultsPacificNorthwest.rankedClusters);
+print('Clustered NDVI California:', resultsCalifornia.rankedClusters);
+print('Ranked Clustered NDVI California:', resultsCalifornia.rankedClusters);
